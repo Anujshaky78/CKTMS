@@ -1,0 +1,81 @@
+v5 (latest)
+- Trip rule: max 300 PKT aur max 2 stores per trip, har raste par (config/app.php).
+- 300 se bade store ke challans FIFO se kai trips me bantte hain.
+- Poori app ka naya design + structure. Details: ARCHITECTURE.md.
+- Credentials ab *.local.php files me (update par overwrite nahi hote).
+
+PRD PENDING · PLANNING BOARD UPGRADE
+====================================
+
+KYA BADLA
+- PRD Pending ab challan-wise nahi, STORE-WISE dikhta hai (Source + Destination ek row).
+- Columns: Source Name | Destination / Store | State | Cluster | Challan PKT | Qty | Value | Last Dispatch | Remarks (vehicle planning)
+- Challan PKT = COUNT(DISTINCT challan_no) us store ke liye.
+- Store ke aage ▸ dabane par us store ke saare challans (no., barcode, date, division, qty, value) dikhte hain.
+
+REMARKS / VEHICLE PLANNING ENGINE (includes/prd_planner.php)
+- Dispatch now : fill kam hai par store overdue hai (critical_days se zyada) -> abhi bhejo
+- FTL          : store akela badi gaadi bhar deta hai; zarurat ho to 2 gaadi (jaise 32FT + 14FT)
+- Club load    : same source ke paas-paas ke stores (club_radius_km ke andar) ek gaadi me, max 4 stops,
+                 shortest route order DC se (4 stops tak exact calculation)
+- PTL          : single store, chhoti gaadi, fill theek hai
+- Hold         : fill kam aur urgent nahi -> kitne PKT aur chahiye ye bhi batata hai
+- Map store    : destination Store Master me nahi mila
+- Closed       : store_status closed
+- Gaadi size Vehicle Master (vehicle_type, capacity_boxes, value_capacity) se aata hai.
+  Master khali ho to config/prd_planning.php ki fallback list use hoti hai.
+- Flags: value cap se upar, aaj dispatch day nahi (next day), store lat/long missing,
+  source DC master me nahi, kitne din se dispatch nahi hua, lambi store-to-store doori.
+- Har store par Planner Note likh sakte hain (auto save, sync ke baad bhi rehta hai).
+
+TOP SUMMARY
+- Stores, Challan PKT, Qty, Value, DC-wise distinct challans, already-in-trip challans
+- Plan mix bar (click karke filter) + Vehicles needed vs available (Vehicle Master se)
+
+TRIP BANANA (v4: Review plan flow)
+- Step 1 Load from Oracle -> Step 2 stores select (row par click, checkbox, ya "Select this load")
+  -> Step 3 "Review plan" -> Step 4 "Create N trips".
+- Kitne bhi stores aur dono DC ek saath select kar sakte hain. Plan unhe DC-wise, capacity aur
+  distance ke hisaab se trips me baantta hai (max_stops per trip).
+- Review panel me har trip ka DC aur vehicle badal sakte hain, fill % turant update hota hai,
+  stop order aur km dikhte hain, koi trip uncheck karke chhod sakte hain.
+- Saare trips ek transaction me bante hain: ek bhi fail ho to koi nahi banta, aur error usi panel me dikhta hai.
+- Store Master me nahi / closed stores "left out" list me reason ke saath dikhte hain.
+
+PURANA (v1-v3) TRIP BANANA
+- Checkbox se stores chuno ya plan header par "Select this load" dabao.
+- Neeche dark bar: selected PKT, value, suggested vehicle aur fill %, warnings.
+- Source DC auto-select hota hai (agar source site code/name DC Master se match kare).
+- Create trip: route order optimize, stop packet_count = challan PKT,
+  har store ka indent PRD-T<tripId>-<stop>, source_ref me challan numbers.
+- Trip me gaye challans board se hat jaate hain. Trip CANCEL karne par wapas aa jaate hain.
+- Purane build ke PRD-<id> indents automatically link ho jaate hain (double planning nahi hoga).
+
+DATA SOURCE (v2)
+- PRD Pending sirf Oracle se, sirf CHALLAN_STATUS = PENDING. Details SETUP_ORACLE.txt me.
+- Store Master Oracle ki MISRETAIL.T_STORE_OPENING_DATE se sync hota hai.
+
+EXPORT
+- "Export plan (CSV)": poora board + plan ID, vehicle, fill %, route km, remarks, notes, challan list.
+
+TUNING (config/prd_planning.php)
+- max_stops, ftl_fill_pct, min_fill_pct, target_fill_pct, club_radius_km,
+  watch_days, critical_days, fallback_vehicles, closed_status_words
+
+FILES
+- NEW  config/prd_planning.php
+- NEW  includes/prd_planner.php
+- NEW  includes/prd_pending_view.php
+- EDIT pages/PLANNING.php      (export/note handlers, naya create_prd_trip, PRD tab view)
+- EDIT config/DB.php           (prd_pending.planned_trip_id, planned_at, table prd_planner_notes)
+- NEW  config/oracle.local.example.php (credentials yahan, oracle.local.php naam se)
+- NEW  pages/PRD_RECON.php      (PKT/Qty/Value reconciliation with Oracle)
+- NEW  includes/oracle_sync.php  (Oracle PRD pending + Store Master sync)
+- EDIT config/oracle.php       (challan_status, store sync settings)
+- EDIT pages/MASTER.php        (Store Master "Sync from Oracle", Oracle Site column)
+- REMOVED PRD_PENDING_TEMPLATE.csv (CSV import band, data sirf Oracle se)
+Migration app connect hote hi apne aap chalti hai. Backup lekar files replace karein.
+
+ACCURACY NOTE
+- Distance straight-line (haversine) hai, road km se ~20-30% kam ho sakta hai. club_radius_km usi hisaab se rakhein.
+- Store lat/long Store Master me sahi hone chahiye, warna clubbing sirf same State + Cluster par hogi.

@@ -1,0 +1,68 @@
+ORACLE SETUP · PRD PENDING + STORE MASTER
+=========================================
+
+Oracle par sirf SELECT chalta hai (OCI8, pdo_oci ki zaroorat nahi). Data local PostgreSQL me save hota hai.
+
+1. Existing TMS folder aur PostgreSQL database ka backup lein.
+2. Package files TMS folder me copy karein.
+3. CREDENTIALS: config/oracle.local.example.php ko copy karke config/oracle.local.php banayein aur usme
+   working PKT Challan app wale user, password, connect string aur src_site_codes daalein.
+   oracle.local.php kisi update ZIP me nahi aati, isliye agli baar files replace karne par credentials safe rahenge.
+   (Pehle credentials config/oracle.php me the to update ne unhe placeholder se replace kar diya hoga;
+   isi wajah se sync band hua. Unhe ab oracle.local.php me daalein.)
+   Env variables bhi chalte hain: TMS_ORACLE_USER, TMS_ORACLE_PASSWORD, TMS_ORACLE_CONNECT, TMS_ORACLE_SRC_SITE_CODES.
+4. XAMPP PHP me OCI8 enable ho (extension=oci8_19 ya matching DLL), Instant Client PATH me ho, Apache restart karein.
+5. config/oracle.php check karein:
+   - src_site_codes      : dono DC ke Oracle SITE_CODE, jaise ['123','456']
+   - challan_status      : 'PENDING'  (sirf ye status wale challans aate hain, case/space ignore)
+   - days_back           : 60  (0 = koi date limit nahi)
+   - remove_not_pending  : true (jo challan Oracle me ab Pending nahi, wo board se hat jata hai)
+   - store_table         : 'MISRETAIL.T_STORE_OPENING_DATE'
+   - store_code_from     : 'INITIAL_NAME' (ya 'SITE_CODE')
+   - store_where         : optional filter, jaise "STORE_STATUS <> 'CLOSED'"
+   - store_column_map    : agar city/lat/long ke column naam alag hon
+6. Pehle Master > Store Master > "Sync from Oracle" chalayein (ya seedha PRD Pending ka "Sync Oracle",
+   wo pehle Store Master sync karta hai, phir PRD Pending).
+
+STORE MASTER SYNC (MISRETAIL.T_STORE_OPENING_DATE -> stores)
+- SITE_CODE se store link hota hai (stores.oracle_site_code). Existing store pehle site code, phir
+  store_code, phir store name se match hota hai, isliye duplicate nahi bante.
+- Update: state, city, address, pincode, cluster_type, store_status, active (CLOSED = inactive).
+- Store name tabhi badalta hai jab Oracle me STORE_NAME/SITE_NAME jaisa column ho.
+- Latitude/longitude: Oracle me ho to update, warna aapki manual values same rehti hain.
+- DC sites (src_site_codes + Center DC master codes) store nahi bante.
+- Oracle se hata store TMS se delete nahi hota.
+
+PRD PENDING SYNC (MISRETAIL.CUBE$SALDC -> prd_pending)
+- Filter: CUBE_CODE, source DC site codes, UPPER(TRIM(CHALLAN_STATUS)) = 'PENDING', date window.
+- Destination SITE_CODE bhi aata hai, isliye store match exact hota hai.
+- Ek challan ke APPS/GM/NT rows merge hote hain (pehle wale build me qty overwrite ho jaati thi).
+- Har sync ke baad: dispatch/cancel ho chuke challans, config se hataye gaye DC ka data,
+  aur purana CSV data board se hat jaata hai. Trip me gaye challans kabhi nahi hatte.
+- CSV import band hai. PRD Pending sirf Oracle se aata hai.
+
+SYNC BUTTON KA NAAM = ORACLE KI HALAT
+- "Set up Oracle (OCI8 missing)" : PHP me OCI8 extension enable nahi. Button steps dikhata hai.
+- "Connect Oracle"                : user/password/connect set nahi (oracle.local.php banayein).
+- "Load from Oracle"              : configured hai, abhi tak sync nahi hua.
+- "Refresh from Oracle"           : last sync safal; time aur challan count button ke neeche.
+- "Retry Oracle sync"             : last sync fail; Oracle ka exact error (jaise ORA-12541) board par dikhta hai
+                                    aur pichhla sahi data dikhta rehta hai.
+
+PKT / QTY / VALUE GALAT LAGE TO
+- PRD Pending page par "Check totals against Oracle" link (pages/PRD_RECON.php) kholein, "Run check on Oracle" dabayein.
+  Ye Oracle par sirf SELECT chalata hai aur batata hai:
+  * T_STORE_OPENING_DATE / MAS$ITEM me duplicate rows jo qty/value multiply kar rahi thi (is build me fix)
+  * CHALLAN_QTY/AMOUNT har line par challan total repeat hota hai ya nahi -> 'qty_value_mode'
+  * CHALLAN_NO vs CHALLAN_BARCODE count -> 'pkt_basis'
+  * date window (days_back) ki wajah se chhoote pending challans
+  * Oracle status-wise breakdown aur TMS vs Oracle difference
+- "Trace one challan": ek challan ki Oracle lines aur TMS row side-by-side, PKT Challan app se milane ke liye.
+- Config badalne ke baad Sync Oracle ek baar chalayein (pkt_basis ke liye zaroori nahi).
+
+Troubleshooting:
+- "OCI8 extension enabled nahi hai": php.ini compare karein working app se, Apache restart.
+- Connection failed: connect string/service, credentials, network, Instant Client PATH.
+- Query failed: SELECT grant chahiye MISRETAIL.CUBE$SALDC, MISRETAIL.MAS$ITEM, MISRETAIL.T_STORE_OPENING_DATE par.
+- "SITE_CODE column nahi mila": store_column_map me 'site_code' set karein.
+- Credentials ZIP me nahi hain.
