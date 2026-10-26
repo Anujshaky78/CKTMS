@@ -22,6 +22,33 @@ function app_cfg(?string $key = null) {
   $v = $c; foreach (explode('.', $key) as $p) { if (!is_array($v) || !array_key_exists($p, $v)) return null; $v = $v[$p]; }
   return $v;
 }
+/** Upload storage folder (config 'storage_dir', outside the web root) plus a sub folder; created on demand and closed to the web. */
+function tms_storage_dir(string $sub): string {
+  $base = rtrim(str_replace('\\', '/', (string)(app_cfg('storage_dir') ?: (TMS_ROOT . '/storage'))), '/');
+  $dir = $base . '/' . $sub;
+  if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) throw new Exception('Storage folder nahi ban saka: ' . $dir);
+  if (!is_file($base . '/.htaccess')) @file_put_contents($base . '/.htaccess', "Require all denied\n"); // only matters if storage_dir is ever placed under the web root
+  return $dir;
+}
+/** Validates and stores one uploaded Gate Pass file (size, extension, real file type, random name). Returns [absolute path, document_path to save]. */
+function tms_save_gatepass_file(array $f, int $tripId): array {
+  if ((int)($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) throw new Exception('Gate Pass file upload nahi hui (error ' . (int)($f['error'] ?? -1) . ').');
+  $mb = (int)(app_cfg('upload_max_mb') ?? 5);
+  if ((int)$f['size'] <= 0 || (int)$f['size'] > $mb * 1048576) throw new Exception("Gate Pass file $mb MB se chhoti honi chahiye.");
+  $ext = strtolower(pathinfo((string)$f['name'], PATHINFO_EXTENSION));
+  $types = ['pdf' => ['application/pdf'], 'jpg' => ['image/jpeg'], 'jpeg' => ['image/jpeg'], 'png' => ['image/png'],
+    'xlsx' => ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/zip', 'application/octet-stream'],
+    'xls' => ['application/vnd.ms-excel', 'application/x-ole-storage', 'application/CDFV2', 'application/octet-stream']];
+  if (!isset($types[$ext])) throw new Exception('Gate Pass file only PDF/JPG/PNG/XLS/XLSX allowed.');
+  if (function_exists('finfo_open') && ($fi = finfo_open(FILEINFO_MIME_TYPE))) {
+    $mime = (string)finfo_file($fi, (string)$f['tmp_name']); finfo_close($fi);
+    if (!in_array($mime, $types[$ext], true)) throw new Exception("Gate Pass file ka type ($mime) .$ext se match nahi karta.");
+  }
+  $dir = tms_storage_dir('gatepass');
+  $fn = 'GP-' . $tripId . '-' . bin2hex(random_bytes(8)) . '.' . $ext;
+  if (!move_uploaded_file((string)$f['tmp_name'], $dir . '/' . $fn)) throw new Exception('Gate Pass file save nahi hui.');
+  return [$dir . '/' . $fn, 'gatepass/' . $fn];
+}
 /** URL to a file under the app root, from any page in /pages. */
 function asset(string $path): string { $f = TMS_ROOT . '/' . ltrim($path, '/'); return '../' . ltrim($path, '/') . (is_file($f) ? '?v=' . filemtime($f) : ''); }
 

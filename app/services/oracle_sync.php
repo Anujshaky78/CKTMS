@@ -12,7 +12,7 @@ function tms_oracle_cfg(): array {
   $c = require TMS_ROOT . '/config/oracle.php';
   $c += ['challan_status' => 'PENDING', 'days_back' => 0, 'remove_not_pending' => true, 'store_table' => 'MISRETAIL.T_STORE_OPENING_DATE',
     'store_where' => '', 'store_code_from' => 'INITIAL_NAME', 'store_exclude_dc_sites' => true, 'store_column_map' => [], 'sync_stores_with_prd' => true,
-    'pkt_basis' => 'CHALLAN_NO', 'qty_value_mode' => 'line_sum'];
+    'pkt_basis' => 'CHALLAN_NO', 'qty_value_mode' => 'line_sum', 'allow_empty_sync' => false];
   $c['pkt_basis'] = strtoupper((string)$c['pkt_basis']) === 'CHALLAN_BARCODE' ? 'CHALLAN_BARCODE' : 'CHALLAN_NO';
   $c['qty_value_mode'] = $c['qty_value_mode'] === 'challan_max' ? 'challan_max' : 'line_sum';
   $sites = $c['src_site_codes'] ?? ['123'];
@@ -93,9 +93,13 @@ function tms_store_sync_from_oracle(PDO $d, $conn = null): array {
   if (!$conn) { $conn = tms_oracle_connect($cfg); $own = true; }
   $table = (string)$cfg['store_table'];
   if (!preg_match('/^[A-Za-z0-9_$#]+(\.[A-Za-z0-9_$#]+)?$/', $table)) throw new Exception('config/oracle.php: store_table ka naam galat hai.');
-  $where = trim((string)$cfg['store_where']);
-  if ($where !== '' && preg_match('/;|\b(insert|update|delete|merge|drop|alter|create|grant|truncate|begin|exec)\b/i', $where)) throw new Exception('config/oracle.php: store_where me sirf filter condition likhein.');
-  $st = tms_oracle_query($conn, "SELECT * FROM $table" . ($where !== '' ? " WHERE $where" : ''));
+  // Stores (LOCATION='STORE') plus the two source DCs. Only the columns the TMS uses are read.
+  $dcIn = []; $binds = [];
+  foreach ((array)$cfg['src_site_codes'] as $i => $sc) { $dcIn[] = ':dc' . $i; $binds[':dc' . $i] = (string)$sc; }
+  // Only stores with these STORE_STATUS values come in (config/oracle.php 'store_statuses'); the source DCs are taken whatever their status.
+  $stIn = []; foreach (array_values((array)($cfg['store_statuses'] ?? ['ACTIVE', 'UPCOMING_STORE'])) as $i => $sv) { $stIn[] = ':ss' . $i; $binds[':ss' . $i] = strtoupper(trim((string)$sv)); }
+  $st = tms_oracle_query($conn, "SELECT SITE_CODE, STORE_NAME, INITIAL_NAME, OPENING_DATE, STATE, STORE_STATUS, CLUSTER_TYPE, CITY_NAME, DISTRICT, LOCATION, EMAIL_ID, STORE_GRADE, REGION_TYPE, LONGITUDE, LATITUDE
+    FROM $table WHERE (LOCATION = 'STORE'" . ($stIn ? " AND UPPER(TRIM(STORE_STATUS)) IN (" . implode(',', $stIn) . ")" : '') . ")" . ($dcIn ? " OR (LOCATION = 'DC' AND SITE_CODE IN (" . implode(',', $dcIn) . "))" : ''), $binds);
 
   // Column auto-detect (first match wins), config map overrides
   $cands = [
@@ -110,6 +114,12 @@ function tms_store_sync_from_oracle(PDO $d, $conn = null): array {
     'longitude' => ['LONGITUDE', 'LONG', 'LNG', 'LON'],
     'cluster_type' => ['CLUSTER_TYPE', 'CLUSTER'],
     'store_status' => ['STORE_STATUS', 'STATUS'],
+    'location' => ['LOCATION'],
+    'district' => ['DISTRICT'],
+    'grade' => ['STORE_GRADE'],
+    'region' => ['REGION_TYPE'],
+    'email' => ['EMAIL_ID'],
+    'opening' => ['OPENING_DATE'],
   ];
   $ncols = oci_num_fields($st); $have = [];
   for ($i = 1; $i <= $ncols; $i++) $have[strtoupper((string)oci_field_name($st, $i))] = true;
@@ -134,9 +144,11 @@ function tms_store_sync_from_oracle(PDO $d, $conn = null): array {
   $codeTaken = $d->prepare("SELECT 1 FROM stores WHERE lower(store_code)=lower(?) LIMIT 1");
   $upd = $d->prepare("UPDATE stores SET oracle_site_code=?, store_name=COALESCE(?,store_name), city=COALESCE(?,city), state=COALESCE(?,state), address=COALESCE(?,address),
       pincode=COALESCE(?,pincode), latitude=CASE WHEN ?::numeric<>0 THEN ?::numeric ELSE latitude END, longitude=CASE WHEN ?::numeric<>0 THEN ?::numeric ELSE longitude END,
-      cluster_type=COALESCE(?,cluster_type), store_status=COALESCE(?,store_status), active=?, oracle_synced_at=CURRENT_TIMESTAMP WHERE id=?");
-  $ins = $d->prepare("INSERT INTO stores(store_code,store_name,city,state,address,pincode,latitude,longitude,cluster_type,store_status,active,oracle_site_code,oracle_synced_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)");
+      cluster_type=COALESCE(?,cluster_type), store_status=COALESCE(?,store_status), active=?,
+      district=COALESCE(?,district), store_grade=COALESCE(?,store_grade), region_type=COALESCE(?,region_type), email_id=COALESCE(?,email_id), opening_date=COALESCE(?::date,opening_date),
+      oracle_synced_at=CURRENT_TIMESTAMP WHERE id=?");
+  $ins = $d->prepare("INSERT INTO stores(store_code,store_name,city,state,address,pincode,latitude,longitude,cluster_type,store_status,active,oracle_site_code,district,store_grade,region_type,email_id,opening_date,oracle_synced_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?::date,CURRENT_TIMESTAMP)");
 
   $stats = ['read' => 0, 'inserted' => 0, 'updated' => 0, 'skipped_dc' => 0, 'skipped' => 0, 'no_geo' => 0, 'columns' => $map];
   $d->beginTransaction();
@@ -146,7 +158,18 @@ function tms_store_sync_from_oracle(PDO $d, $conn = null): array {
       $v = []; foreach ($cands as $k => $_) $v[$k] = isset($map[$k]) ? trim((string)($r[$map[$k]] ?? '')) : '';
       $site = $v['site_code'];
       if ($site === '') { $stats['skipped']++; continue; }
-      if (isset($dcSites[$site])) { $stats['skipped_dc']++; continue; }
+      if (strtoupper($v['location']) === 'DC' || isset($dcSites[$site])) {
+        // A source DC: keep its name and map position in the DC master (matched by Oracle site code, else by DC code)
+        $dl = is_numeric($v['latitude']) ? (float)$v['latitude'] : 0.0; $dg = is_numeric($v['longitude']) ? (float)$v['longitude'] : 0.0;
+        if (abs($dl) > 90 || abs($dg) > 180) { $dl = 0.0; $dg = 0.0; }
+        $dname = tms_cut($v['store_name'] !== '' ? $v['store_name'] : ($v['initial_name'] !== '' ? $v['initial_name'] : 'DC ' . $site), 150);
+        $dq = $d->prepare("SELECT id FROM tms_dc_master WHERE oracle_site_code=? OR (oracle_site_code IS NULL AND (dc_code=? OR dc_code=?)) ORDER BY (oracle_site_code=?) DESC NULLS LAST LIMIT 1");
+        $dq->execute([$site, $site, $v['initial_name'], $site]); $did = $dq->fetchColumn();
+        if ($did) $d->prepare("UPDATE tms_dc_master SET oracle_site_code=?, dc_name=?, latitude=CASE WHEN ?::numeric<>0 THEN ?::numeric ELSE latitude END, longitude=CASE WHEN ?::numeric<>0 THEN ?::numeric ELSE longitude END WHERE id=?")->execute([$site, $dname, $dl, $dl, $dg, $dg, (int)$did]);
+        else $d->prepare("INSERT INTO tms_dc_master(dc_code,dc_name,latitude,longitude,active,oracle_site_code) VALUES(?,?,?,?,TRUE,?)")->execute([tms_cut($v['initial_name'] !== '' ? $v['initial_name'] : $site, 60), $dname, $dl, $dg, $site]);
+        $stats['skipped_dc']++; continue;
+      }
+      $extra = [tms_cut($v['district'], 100), tms_cut($v['grade'], 50), tms_cut($v['region'], 100), tms_cut($v['email'], 150), ($v['opening'] !== '' && ($ts = strtotime($v['opening'])) !== false) ? date('Y-m-d', $ts) : null];
       $initial = $v['initial_name'] !== '' ? $v['initial_name'] : $v['store_name'];
       $name = $v['store_name'] !== '' ? $v['store_name'] : $initial;
       if ($name === '') $name = 'SITE ' . $site;
@@ -163,16 +186,20 @@ function tms_store_sync_from_oracle(PDO $d, $conn = null): array {
       $updName = $v['store_name'] !== '' ? tms_cut($v['store_name'], 150) : null;
       $common = [tms_cut($v['city'], 100), tms_cut($v['state'], 100), tms_cut($v['address'], 1000), tms_cut($v['pincode'], 10)];
       if ($id) {
-        $upd->execute(array_merge([$site, $updName], $common, [$lat, $lat, $lng, $lng, tms_cut($v['cluster_type'], 100), tms_cut($status, 100), $active ? 'true' : 'false', (int)$id]));
+        $upd->execute(array_merge([$site, $updName], $common, [$lat, $lat, $lng, $lng, tms_cut($v['cluster_type'], 100), tms_cut($status, 100), $active ? 'true' : 'false'], $extra, [(int)$id]));
         $stats['updated']++;
       } else {
         $code = $codeFrom === 'site_code' ? $site : ($initial !== '' ? $initial : $site);
         $code = tms_cut($code, 60);
         $codeTaken->execute([$code]); if ($codeTaken->fetchColumn()) $code = tms_cut($code, 50) . '-' . $site;
-        $ins->execute(array_merge([$code, tms_cut($name, 150)], $common, [$lat, $lng, tms_cut($v['cluster_type'], 100), tms_cut($status, 100), $active ? 'true' : 'false', $site]));
+        $ins->execute(array_merge([$code, tms_cut($name, 150)], $common, [$lat, $lng, tms_cut($v['cluster_type'], 100), tms_cut($status, 100), $active ? 'true' : 'false', $site], $extra));
         $stats['inserted']++;
       }
     }
+    // Stores that came from Oracle earlier but are not returned now (closed / not ACTIVE or UPCOMING_STORE) become inactive.
+    // Rows touched above carry this transaction's timestamp, so older ones were not in the result. Nothing is deleted.
+    $stats['deactivated'] = 0;
+    if ($stats['inserted'] + $stats['updated'] > 0) $stats['deactivated'] = $d->exec("UPDATE stores SET active=FALSE WHERE oracle_site_code IS NOT NULL AND COALESCE(active,TRUE) AND oracle_synced_at < CURRENT_TIMESTAMP");
     $d->commit();
   } catch (Throwable $e) { if ($d->inTransaction()) $d->rollBack(); throw $e; }
   finally { oci_free_statement($st); if ($own) @oci_close($conn); }
@@ -275,7 +302,12 @@ function tms_prd_sync_from_oracle(PDO $d, $conn = null): array {
     if (!empty($r['SUB_DIV'])) $x['div'][(string)$r['SUB_DIV']] = true;
     unset($x);
   }
+  // oci_fetch_assoc() returns false both at the end of data and on an error, so check for an error before trusting the result.
+  $fetchErr = oci_error($st);
   oci_free_statement($st); if ($own) @oci_close($conn);
+  if ($fetchErr) throw new Exception('Oracle fetch failed after ' . $read . ' row(s); PRD Pending was left unchanged: ' . trim((string)($fetchErr['message'] ?? 'unknown OCI8 error')));
+  // An empty result would make the "no longer pending" clean-up below delete the whole board, so it needs an explicit opt-in.
+  if (!$rows && empty($cfg['allow_empty_sync'])) throw new Exception("Oracle returned 0 pending challans for these sites; PRD Pending was left unchanged. If the board really should be empty, set 'allow_empty_sync' => true in config/oracle.local.php for one sync.");
 
   $ins = $d->prepare("INSERT INTO prd_pending(source_site_code,source_name,destination_site_code,destination_name,state,cluster_type,store_status,sub_div,challan_no,challan_barcode,challan_date,qty,value,out_location,prepared_by,challan_status,last_dispatch_date,source_system,source_key,synced_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ORACLE',?,CURRENT_TIMESTAMP)
@@ -295,8 +327,10 @@ function tms_prd_sync_from_oracle(PDO $d, $conn = null): array {
       // Rows of these DCs that Oracle did not return now are no longer pending (inside the window).
       // CURRENT_TIMESTAMP is fixed for the transaction, so untouched rows have an older synced_at.
       $sp = implode(',', array_fill(0, count($sites), '?'));
-      $del = $d->prepare("DELETE FROM prd_pending p WHERE p.source_system='ORACLE' AND p.source_site_code IN ($sp) AND p.synced_at < CURRENT_TIMESTAMP AND " . prd_pending_where('p'));
-      $del->execute($sites); $removed = $del->rowCount();
+      // With days_back > 0 Oracle only returns challans inside the window, so only rows inside it may be judged "no longer pending".
+      $win = $days > 0 ? " AND (p.challan_date IS NULL OR p.challan_date >= CURRENT_DATE - ?::int)" : '';
+      $del = $d->prepare("DELETE FROM prd_pending p WHERE p.source_system='ORACLE' AND p.source_site_code IN ($sp) AND p.synced_at < CURRENT_TIMESTAMP AND " . prd_pending_where('p') . $win);
+      $del->execute($days > 0 ? array_merge($sites, [$days]) : $sites); $removed = $del->rowCount();
     }
     // DC sites removed from config/oracle.php
     $sp = implode(',', array_fill(0, count($sites), '?'));
@@ -307,4 +341,66 @@ function tms_prd_sync_from_oracle(PDO $d, $conn = null): array {
     $d->commit();
   } catch (Throwable $e) { if ($d->inTransaction()) $d->rollBack(); throw $e; }
   return ['read' => $read, 'challans' => count($rows), 'removed' => $removed, 'status' => $status, 'days' => $days, 'sites' => $sites];
+}
+
+/* ======================================================================
+ * SYNC RUNNER (manual button, page-triggered background run, scheduled task)
+ * One sync at a time: a PostgreSQL advisory lock is held while it runs.
+ * ==================================================================== */
+function tms_sync_try_lock(PDO $d): bool { return (bool)$d->query("SELECT pg_try_advisory_lock(727002)")->fetchColumn(); }
+function tms_sync_unlock(PDO $d): void { try { $d->query("SELECT pg_advisory_unlock(727002)"); } catch (Throwable $e) {} }
+function tms_sync_running(PDO $d): bool { if (tms_sync_try_lock($d)) { tms_sync_unlock($d); return false; } return true; }
+
+/**
+ * Connect to Oracle, sync (Store Master only when $withStores) and PRD Pending, and write the sync log. Never throws.
+ * The caller must hold the sync lock. $source is only a label in the log ('manual' | 'auto').
+ * @return array{ok:bool,message:string,challans:int}
+ */
+function tms_run_prd_sync(PDO $d, bool $withStores, string $source = 'manual'): array {
+  $ora = null;
+  try {
+    $ocfg = tms_oracle_cfg(); $ora = tms_oracle_connect($ocfg); $parts = [];
+    if ($withStores && !empty($ocfg['sync_stores_with_prd'])) {
+      try { $ss = tms_store_sync_from_oracle($d, $ora); $parts[] = "Store Master: {$ss['inserted']} new, {$ss['updated']} updated"; }
+      catch (Throwable $se) { $parts[] = 'Store Master sync skipped: ' . $se->getMessage(); }
+    }
+    $ps = tms_prd_sync_from_oracle($d, $ora);
+    $parts[] = "PRD Pending: {$ps['challans']} pending challan(s) loaded" . ($ps['removed'] ? ", {$ps['removed']} no-longer-pending removed" : '') . ' (CHALLAN_STATUS = ' . $ps['status'] . ($ps['days'] ? ", last {$ps['days']} days" : ', all dates') . ')';
+    @oci_close($ora); $ora = null;
+    $msg = ($source === 'auto' ? '[auto] ' : '') . implode(' · ', $parts);
+    tms_sync_log($d, 'prd', true, $msg, (int)$ps['challans']);
+    return ['ok' => true, 'message' => $msg, 'challans' => (int)$ps['challans']];
+  } catch (Throwable $x) {
+    if ($d->inTransaction()) $d->rollBack();
+    tms_sync_log($d, 'prd', false, ($source === 'auto' ? '[auto] ' : '') . $x->getMessage());
+    return ['ok' => false, 'message' => $x->getMessage(), 'challans' => 0];
+  } finally { if ($ora) @oci_close($ora); }
+}
+
+/**
+ * Called when the PRD Pending page opens. If the last good sync is older than prd_sync.max_age_sec and none is running, starts
+ * app/cli/sync_prd.php in the background (the page does not wait for it).
+ * @return array{state:string} off | fresh | running | started
+ */
+function tms_prd_autosync_kick(PDO $d): array {
+  $c = (array)(app_cfg('prd_sync') ?? []);
+  if (empty($c['auto'])) return ['state' => 'off'];
+  $os = tms_oracle_status($d, 'prd');
+  if (in_array($os['state'], ['no_oci8', 'not_configured'], true)) return ['state' => 'off'];
+  if (tms_sync_running($d)) return ['state' => 'running'];
+  $ageOk = $d->query("SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(created_at))) FROM tms_sync_log WHERE kind='prd' AND ok")->fetchColumn();
+  $ageAny = $d->query("SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(created_at))) FROM tms_sync_log WHERE kind='prd'")->fetchColumn();
+  if ($ageOk !== null && $ageOk !== false && (float)$ageOk <= (int)($c['max_age_sec'] ?? 120)) return ['state' => 'fresh'];
+  if ($ageAny !== null && $ageAny !== false && (float)$ageAny < (int)($c['retry_after_sec'] ?? 60)) return ['state' => 'fresh']; // just tried (and failed): do not hammer Oracle on every refresh
+  return ['state' => tms_prd_sync_spawn(false, false) ? 'started' : 'off'];
+}
+
+/** Starts app/cli/sync_prd.php in the background (Windows). $withStores also refreshes Store Master (admins only); $manual = started by the Refresh button. Returns false if it cannot be started. */
+function tms_prd_sync_spawn(bool $withStores, bool $manual = true): bool {
+  $c = (array)(app_cfg('prd_sync') ?? []);
+  $php = str_replace('/', '\\', (string)($c['php_cli'] ?? 'C:/xampp/php/php.exe'));
+  $script = str_replace('/', '\\', TMS_ROOT . '/app/cli/sync_prd.php');
+  if (!is_file($php) || !is_file($script) || !function_exists('popen')) return false;
+  pclose(popen('start "" /B "' . $php . '" "' . $script . '"' . ($withStores ? ' --stores' : '') . ($manual ? ' --manual' : '') . ' > NUL 2>&1', 'r'));
+  return true;
 }

@@ -24,9 +24,10 @@ foreach ($d->query("SELECT COALESCE(source_site_code,'') src,
     COUNT(DISTINCT NULLIF(BTRIM(challan_barcode),'')) FILTER (WHERE " . prd_pending_where('p') . ") bc_p,
     COALESCE(SUM(qty) FILTER (WHERE " . prd_pending_where('p') . "),0) qty_p,
     COALESCE(SUM(value) FILTER (WHERE " . prd_pending_where('p') . "),0) val_p,
-    COUNT(DISTINCT $pk) FILTER (WHERE NOT " . prd_pending_where('p') . ") pkt_trip,
-    COALESCE(SUM(qty) FILTER (WHERE NOT " . prd_pending_where('p') . "),0) qty_trip,
-    COALESCE(SUM(value) FILTER (WHERE NOT " . prd_pending_where('p') . "),0) val_trip,
+    COUNT(DISTINCT $pk) FILTER (WHERE NOT " . prd_pending_where('p') . " AND p.synced_at >= (SELECT MAX(synced_at) FROM prd_pending WHERE source_system='ORACLE')) pkt_trip,
+    COUNT(DISTINCT $pk) FILTER (WHERE NOT " . prd_pending_where('p') . " AND p.synced_at < (SELECT MAX(synced_at) FROM prd_pending WHERE source_system='ORACLE')) pkt_gone,
+    COALESCE(SUM(qty) FILTER (WHERE NOT " . prd_pending_where('p') . " AND p.synced_at >= (SELECT MAX(synced_at) FROM prd_pending WHERE source_system='ORACLE')),0) qty_trip,
+    COALESCE(SUM(value) FILTER (WHERE NOT " . prd_pending_where('p') . " AND p.synced_at >= (SELECT MAX(synced_at) FROM prd_pending WHERE source_system='ORACLE')),0) val_trip,
     MAX(synced_at) synced
   FROM prd_pending p WHERE p.source_system='ORACLE' AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=" . $d->quote(prd_status_filter()) . " GROUP BY 1 ORDER BY 1")->fetchAll(PDO::FETCH_ASSOC) as $r) $tms[$r['src']] = $r;
 $tmsSync = $tms ? max(array_column($tms, 'synced')) : null;
@@ -102,10 +103,12 @@ if ($run && !$err) {
   $oPkt = $basis === 'CHALLAN_BARCODE' ? $oSum['bc'] : $oSum['ch'];
   $dPkt = $oPkt - ($tSum['pkt'] + $tSum['pkt_trip']);
   $dVal = ($cfg['qty_value_mode'] === 'challan_max' ? (float)($hdr['VAL_MAX'] ?? 0) : $oSum['val']) - ($tSum['val'] + $tSum['val_trip']);
-  if (abs($dPkt) > 0 || abs($dVal) > 1) {
+  if (abs($dPkt) > 0 || abs($dVal) > 100) { // values are rounded per row in TMS, so a few rupees on crores is not a difference
     $find[] = ['bad', 'TMS data is out of date compared to Oracle right now', 'Oracle (same filters) has ' . $n($oPkt) . ' PKT; TMS has ' . $n($tSum['pkt']) . ' on the board + ' . $n($tSum['pkt_trip']) . ' already in trips. Value difference ₹' . $r2($dVal) . '. Last sync ' . e(substr((string)$tmsSync, 0, 16)) . '. Click Sync Oracle to refresh.'];
-  } else $find[] = ['ok', 'TMS matches Oracle', 'Board PKT + PKT already in trips = Oracle PKT, and value matches.'];
+  } else $find[] = ['ok', 'TMS matches Oracle', 'Board PKT + PKT already in trips = Oracle PKT (' . $n($oPkt) . '), and value matches' . (abs($dVal) > 0.005 ? ' (rounding difference ₹' . $r2($dVal) . ')' : '') . '.'];
   if ($tSum['pkt_trip'] > 0) $find[] = ['info', 'Challans in trips are not on the board', $n($tSum['pkt_trip']) . ' PKT (₹' . $r2($tSum['val_trip']) . ') are already in TMS trips but still Pending in Oracle. That is expected until the challan is dispatched in Oracle.'];
+  $__gone = array_sum(array_map(fn($r) => (int)$r['pkt_gone'], $tms));
+  if ($__gone > 0) $find[] = ['bad', 'PKT on trips that Oracle has already dispatched', $n($__gone) . ' PKT are linked to TMS trips, but the last sync did not return them, so they are no longer Pending in Oracle. They are not counted in the totals above. Review those trips (Trips tab): they may duplicate work already dispatched elsewhere.'];
 }
 
 head('PRD Reconciliation');

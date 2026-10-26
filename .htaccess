@@ -1,0 +1,4 @@
+# Report / data files must never be downloadable by URL (GPS reports, exports).
+<FilesMatch "\.(xlsx|xls|csv)$">
+  Require all denied
+</FilesMatch>

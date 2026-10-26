@@ -1,5 +1,16 @@
 <div id="recordModal" class="record-modal" style="display:none"><div class="record-modal-box"><div class="record-modal-head"><b id="recordTitle">Edit</b><button type="button" onclick="closeRecordModal()">×</button></div><div id="recordBody"></div></div></div>
 <script>
+// CSRF: add the session token to every POST form on this page, including forms built in JS and submitted with form.submit().
+(function(){
+  const T=<?= json_encode(csrf()) ?>; window.TMS_CSRF=T;
+  function addToken(f){
+    if(!f||String(f.method).toLowerCase()!=='post'||f.querySelector('input[name="csrf"]'))return;
+    const i=document.createElement('input');i.type='hidden';i.name='csrf';i.value=T;f.appendChild(i);
+  }
+  document.addEventListener('submit',e=>addToken(e.target),true);
+  const nativeSubmit=HTMLFormElement.prototype.submit;
+  HTMLFormElement.prototype.submit=function(){addToken(this);return nativeSubmit.call(this);};
+})();
 const masterTransporters=<?= json_encode(array_map(fn($t)=>$t['name'], dsp_transporters($d)), JSON_UNESCAPED_UNICODE|JSON_HEX_TAG) ?>;
 const TRIP_MAX_STORES=<?= (int)tms_trip_max_stores() ?>, TRIP_MAX_PKT=<?= (int)tms_trip_max_pkt() ?>;
 const masterStores=<?=json_encode(array_values($stores),JSON_UNESCAPED_UNICODE|JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT)?>;
@@ -48,9 +59,9 @@ function acceptTrip(x){
   showRecord('Accept Trip '+(x.trip_code||''),`<form method="post" class="record-form">
     <input type="hidden" name="action" value="assign_trip">
     <input type="hidden" name="trip_id" value="${x.id}">
-    <label>Transporter<select class="select" name="tpt_name" id="acceptTpt" required><option value="">Select transporter</option>${tOpts}</select></label>
-    <label>Vehicle<select class="select" name="vehicle_id" required><option value="">Select Vehicle</option>${vOpts}</select></label>
-    <label>Driver<select class="select" name="driver_id" id="acceptDriver" required><option value="">Select Driver</option>${dOpts}</select></label>
+    <label>Transporter<select class="select" data-search name="tpt_name" id="acceptTpt" required><option value="">Select transporter</option>${tOpts}</select></label>
+    <label>Vehicle<select class="select" data-search name="vehicle_id" required><option value="">Select Vehicle</option>${vOpts}</select></label>
+    <label>Driver<select class="select" data-search name="driver_id" id="acceptDriver" required><option value="">Select Driver</option>${dOpts}</select></label>
     <div class="record-actions"><button class="btn success">Accept Trip</button><button type="button" class="btn light" onclick="closeRecordModal()">Cancel</button></div>
   </form>`);
   const t=document.getElementById('acceptTpt'),dd=document.getElementById('acceptDriver');
@@ -127,22 +138,71 @@ function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;',
 function initTripMap(){
   const el=document.getElementById('tripMap'); if(!el||typeof L==='undefined') return;
   const points=<?=json_encode(array_values(array_filter(array_merge((!empty($trip['dc_latitude'])||!empty($trip['dc_longitude']))?[['code'=>$trip['dc_code']??'DC','name'=>$trip['dc_name']??'Center DC','city'=>'','lat'=>(float)($trip['dc_latitude']??0),'lon'=>(float)($trip['dc_longitude']??0),'source'=>true,'stop_no'=>0]]:[],array_map(fn($i)=>['code'=>$i['store_code'],'name'=>$i['store_name'],'city'=>$i['city']??'','lat'=>(float)($i['latitude']??0),'lon'=>(float)($i['longitude']??0),'source'=>false,'stop_no'=>$i['sequence_no']],$stops)),fn($p)=>((float)$p['lat']!==0||(float)$p['lon']!==0))), JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)?>;
-  if(!points.length){el.innerHTML='<div style="padding:18px" class="note">Store/DC latitude and longitude are not available. Add coordinates in Master to show the route.</div>';return;}
+  const vno=<?=json_encode((string)($trip['vehicle_number']??''))?>, hasVeh=!!vno&&vno!=='UNASSIGNED';   // the vehicle is drawn on every trip that has one, even when store coordinates are missing
+  if(!points.length&&!hasVeh){el.innerHTML='<div style="padding:18px" class="note">Store/DC latitude and longitude are not available. Add coordinates in Master to show the route.</div>';return;}
   const map=L.map(el,{scrollWheelZoom:true});
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
   const latlngs=points.map(p=>[p.lat,p.lon]);
-  const bounds=L.latLngBounds(latlngs);
+  const bounds=points.length?L.latLngBounds(latlngs):L.latLngBounds([[8,68],[35,97]]);
   points.forEach((p,i)=>{
     const label=p.source?'START • Center DC':'STOP • '+(p.stop_no||i);
     L.marker([p.lat,p.lon]).addTo(map).bindPopup('<span class="map-stop-no">'+escapeHtml(label)+'</span><br><b>'+escapeHtml(p.code)+'</b> — '+escapeHtml(p.name)+(p.city?'<br>'+escapeHtml(p.city):''));
   });
   const fallback=L.polyline(latlngs,{weight:4,dashArray:'8 6'}).addTo(map);
   map.fitBounds(bounds,{padding:[25,25]});
-  const note=document.getElementById('routeNote'),distEl=document.getElementById('routeDistanceText');
+  // A small note on the map says why there is no vehicle icon (no vehicle yet / vehicle not in the GPS reports / no address in the report)
+  const vnEl=L.DomUtil.create('div','trk-note'); let vnShown=false; const vnCtl=L.control({position:'topright'}); vnCtl.onAdd=()=>vnEl;
+  const vnote=(t,ok)=>{vnEl.textContent=t||''; vnEl.classList.toggle('ok',!!ok); if(t&&!vnShown){vnCtl.addTo(map);vnShown=true;} else if(!t&&vnShown){map.removeControl(vnCtl);vnShown=false;}};
+  if(!hasVeh)vnote('No vehicle assigned yet: its position appears here after Accept / Assign.');
+  // Vehicle position from the GPS report files. R-TRAC gives coordinates. G-TRAC gives only an address: the server answers at once with what it knows (an exact spot it
+  // has saved, or an estimate from the store master) and, for a new address, this browser looks the address up on OpenStreetMap (the server cannot reach it) and saves it for next time.
+  if(hasVeh){
+    const trkCsrf=<?=json_encode(csrf())?>;
+    let vMarker=null,vDot=null,vTrail=null,fitted=false,looking=false;
+    const ico=c=>L.divIcon({className:'',html:'<div class="trk-ico '+c+'">🚚</div>',iconSize:[34,34],iconAnchor:[17,17],popupAnchor:[0,-17]});
+    const kmBetween=(a,b)=>{const R=6371,r=x=>x*Math.PI/180,dp=r(b.lat-a.lat),dl=r(b.lng-a.lng),x=Math.sin(dp/2)**2+Math.cos(r(a.lat))*Math.cos(r(b.lat))*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));};
+    const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+    const nom=async qs=>{const r=await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=in&'+qs,{headers:{'Accept-Language':'en'}});if(!r.ok)throw new Error('lookup service answered '+r.status);const a=await r.json();return a[0]?{lat:+a[0].lat,lng:+a[0].lon}:null;};
+    const save=f=>{const fd=new FormData();fd.append('csrf',trkCsrf);Object.keys(f).forEach(k=>fd.append(k,f[k]));return fetch('TRACK_SAVE.php',{method:'POST',body:fd,credentials:'same-origin'}).catch(()=>{});};
+    // PIN centre first, then the road / village; a result more than 40 km from the PIN centre is a wrong road with the same name and is dropped
+    const lookup=async plan=>{
+      let pinPt=plan.pin_pt;
+      if(!pinPt&&plan.pin){pinPt=await nom('postalcode='+plan.pin);if(pinPt)save({pin:plan.pin,lat:pinPt.lat,lng:pinPt.lng});await sleep(1100);}
+      for(const q of plan.queries){const c=await nom('q='+encodeURIComponent(q+', India'));await sleep(1100);if(c&&(!pinPt||kmBetween(pinPt,c)<=40))return c;}
+      return pinPt;
+    };
+    const render=j=>{
+      const cls=j.state==='RUNNING'?'run':(j.fresh==='lost'||j.state==='NO SIGNAL'?'lost':'stop'), ll=[j.pos.lat,j.pos.lng];
+      const lc=document.getElementById('trkLive');   // the Live position card on the left follows the same data
+      if(lc){lc.innerHTML='<small>Live position ('+escapeHtml((j.sources||[]).join(' + '))+')</small><b><span class="tk-pill tk-'+(cls==='run'?'run':cls==='lost'?'lost':'stop')+'">'+escapeHtml(j.state)+'</span> '+(j.speed!==null?escapeHtml(Math.round(j.speed))+' km/h · ':'')+'<span class="'+(j.fresh==='ok'?'':j.fresh==='lost'?'tk-lostt':'tk-old')+'">'+escapeHtml(j.age)+'</span></b><small style="display:block;margin-top:2px">'+escapeHtml(j.location||'')+(j.day_km!==null?' · today '+escapeHtml(Number(j.day_km).toFixed(1))+' km':'')+(j.idle?' · idle '+escapeHtml(j.idle):'')+'</small>';}
+      const html='<b>'+escapeHtml(j.vehicle)+'</b> <span class="tk-pill tk-'+(cls==='run'?'run':cls==='lost'?'lost':'stop')+'">'+escapeHtml(j.state)+'</span><br>'
+        +(j.speed!==null?escapeHtml(Math.round(j.speed))+' km/h · ':'')+escapeHtml(j.age)+(j.ignition?' · ignition '+escapeHtml(j.ignition):'')+'<br>'+escapeHtml(j.location||'')+(j.loc_old?' <i>(last known address, '+escapeHtml(j.loc_age)+')</i>':'')
+        +(j.day_km!==null?'<br>Today '+escapeHtml(Number(j.day_km).toFixed(1))+' km':'')+(j.idle?' · idle '+escapeHtml(j.idle):'')+'<br><small>'+(j.exact?'Position from the report coordinates':'Approximate position (from the report address)')+' · '+escapeHtml((j.sources||[]).join(' + '))+'</small>';
+      const col=cls==='run'?'#17b26a':cls==='lost'?'#f04438':'#667085';
+      if(!vDot)vDot=L.circleMarker(ll,{radius:11,color:col,weight:3,fillColor:'#fff',fillOpacity:.9}).addTo(map);else{vDot.setLatLng(ll);vDot.setStyle({color:col});}   // plain dot under the truck: still visible if the emoji icon cannot be drawn
+      if(!vMarker)vMarker=L.marker(ll,{icon:ico(cls),zIndexOffset:1000}).addTo(map);else{vMarker.setLatLng(ll);vMarker.setIcon(ico(cls));}
+      vMarker.bindPopup(html);
+      vnote('Vehicle '+j.vehicle+' on the map · '+j.age+' · checked '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+(j.lookup?' · finding the exact spot…':''),true);
+      if(j.trail&&j.trail.length>1){const tl=j.trail.concat([ll]);if(!vTrail)vTrail=L.polyline(tl,{weight:3,color:'#f79009',dashArray:'4 6'}).addTo(map).bindTooltip("Today's movement of "+j.vehicle);else vTrail.setLatLngs(tl);}   // the whole day's path when the report has it
+      else if(j.start){const tl=[[j.start.lat,j.start.lng],ll];if(!vTrail)vTrail=L.polyline(tl,{weight:3,color:'#f79009',dashArray:'4 6'}).addTo(map).bindTooltip("Today's movement: "+(j.start_address||'start')+' → now');else vTrail.setLatLngs(tl);}
+      if(!fitted){fitted=true;if(points.length)map.fitBounds(bounds.extend(ll),{padding:[25,25]});else map.setView(ll,9);}
+    };
+    const loadVeh=()=>fetch('TRACK_POS.php?vehicle='+encodeURIComponent(vno),{credentials:'same-origin'}).then(r=>r.json()).then(j=>{
+      if(!j||!j.ok){vnote('Vehicle '+vno+' is not in the G-TRAC / R-TRAC reports, so its position is not available.');return;}
+      if(j.pos)render(j);
+      else vnote(j.lookup?'Finding the position of '+vno+' from its address… a few seconds.':(j.location?'The position of '+vno+' could not be found from its address.':'The GPS report has no location for '+vno+' ('+j.state+').'));
+      if(j.lookup&&!looking){
+        looking=true; const plan=j.lookup;
+        lookup(plan).then(p=>{if(p){j.pos=p;j.lookup=null;render(j);save({address:plan.address,lat:p.lat,lng:p.lng});}else if(!j.pos)vnote('The position of '+vno+' could not be found from its address.');})
+          .catch(e=>{if(!j.pos)vnote('Position lookup failed: '+(e&&e.message?e.message:e));}).finally(()=>{looking=false;});
+      }
+    }).catch(e=>{console.error('vehicle position:',e);vnote('Vehicle position could not be drawn: '+(e&&e.message?e.message:e));});
+    loadVeh(); const vIv=setInterval(()=>{if(!document.getElementById('tripMap')||document.hidden){if(!document.getElementById('tripMap'))clearInterval(vIv);return;}loadVeh();},60000);   // stops when the trip page is left, idle while the tab is hidden
+  }  const note=document.getElementById('routeNote'),distEl=document.getElementById('routeDistanceText');
   const routeLink=document.getElementById('openRoute');
   const coords=points.map(p=>p.lon+','+p.lat).join(';');
   if(routeLink)routeLink.href='https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route='+points.map(p=>p.lat+','+p.lon).join(';');
-  if(points.length<2){if(note)note.textContent='Single point available. Add store coordinates for a route.';return;}
+  if(points.length<2){if(note)note.textContent=points.length?'Single point available. Add store coordinates for a route.':'Store coordinates are not available; only the vehicle position is shown.';return;}
   fetch('https://router.project-osrm.org/route/v1/driving/'+coords+'?overview=full&geometries=geojson')
     .then(r=>r.ok?r.json():Promise.reject())
     .then(data=>{

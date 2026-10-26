@@ -2,50 +2,88 @@
 // Planning POST actions: indents, trips, gate pass, status, PRD sync.
 // Included from pages/PLANNING.php; shares its variables ($d, $stores, $dcs, $msg, $err, $tab, …).
 if($_SERVER['REQUEST_METHOD']==='POST'){
+  verify_csrf(); // every Planning POST form carries the token (injected by _scripts.php)
   $action=$_POST['action']??'';
+  // Role check (see app/lib/auth.php). An action that is not listed here needs the 'plan' permission.
+  require_perm(['sync_prd_oracle'=>'plan','delete_trip'=>'delete','delete_indent'=>'delete','delete_gatepass'=>'delete',
+    'load_trip'=>'load','reach_source'=>'load','confirm_load'=>'load','create_gatepass'=>'load','dispatch_gatepass'=>'load','edit_gatepass'=>'load','quick_load_gatepass'=>'load','load_gatepass'=>'load',
+    'trip_status'=>'track','stop_status'=>'track'][$action]??'plan');
   if($action==='import_prd_csv'){
     $err='PRD Pending ab sirf Oracle se aata hai (CHALLAN_STATUS = Pending). CSV import band hai, "Sync Oracle" use karein.';
   } elseif($action==='sync_prd_oracle'){
     require_once TMS_ROOT.'/app/services/oracle_sync.php';
-    $ora=null;
-    try{
-      $ocfg=tms_oracle_cfg(); $ora=tms_oracle_connect($ocfg); $parts=[];
-      if(!empty($ocfg['sync_stores_with_prd'])){
-        try{ $ss=tms_store_sync_from_oracle($d,$ora); $parts[]="Store Master: {$ss['inserted']} new, {$ss['updated']} updated"; }
-        catch(Throwable $se){ $parts[]='Store Master sync skipped: '.$se->getMessage(); }
-      }
-      $ps=tms_prd_sync_from_oracle($d,$ora);
-      $parts[]="PRD Pending: {$ps['challans']} pending challan(s) loaded".($ps['removed']?", {$ps['removed']} no-longer-pending removed":'').' (CHALLAN_STATUS = '.$ps['status'].($ps['days']?", last {$ps['days']} days":', all dates').')';
-      @oci_close($ora); $ora=null;
-      tms_sync_log($d,'prd',true,implode(' · ',$parts),(int)$ps['challans']);
-      setflash('Oracle sync complete. '.implode(' · ',$parts).'.'); redirect('PLANNING.php?tab=prd_pending');
-    }catch(Throwable $x){ if($d->inTransaction())$d->rollBack(); tms_sync_log($d,'prd',false,$x->getMessage()); $err='Oracle sync failed: '.$x->getMessage(); }
-    finally{ if($ora) @oci_close($ora); }
+    if(tms_sync_running($d)){ redirect('PLANNING.php?tab=prd_pending&syncing='.time()); } // already refreshing: just show the progress banner
+    elseif(tms_prd_sync_spawn(can('sync'))){ redirect('PLANNING.php?tab=prd_pending&syncing='.time()); } // runs in the background; the page shows progress and reloads when done
+    elseif(!tms_sync_try_lock($d)){ $err='Refresh pehle se chal raha hai. Thodi der baad page dobara kholein.'; }
+    else{ // background start not possible: refresh right here (the page waits)
+      try{ $res=tms_run_prd_sync($d,can('sync'),'manual'); } finally { tms_sync_unlock($d); }
+      if($res['ok']){ setflash('Refresh complete. '.$res['message'].'.'); redirect('PLANNING.php?tab=prd_pending'); }
+      else $err='Refresh failed: '.$res['message'];
+    }
   } elseif($action==='create_prd_trip'){
-    $err='Please use “Review plan” on PRD Pending to create trips.';
+    $err='PRD Pending me stores tick karke “Review trips” karein.';
+  } elseif($action==='cancel_plan'){
+    // one store (plan_id + line_id), one plan (plan_id) or everything under review (plan_ids[])
+    try{
+      $n=0; $ids=!empty($_POST['plan_ids'])?array_map('intval',(array)$_POST['plan_ids']):[(int)($_POST['plan_id']??0)];
+      foreach($ids as $pid) $n+=plan_cancel($d,$pid,!empty($_POST['line_id'])?(int)$_POST['line_id']:null);
+      $left=(int)$d->query("SELECT COUNT(*) FROM tms_plan_lines WHERE status='Pending'")->fetchColumn();
+      setflash($n.' store(s) PRD Pending me wapas bhej diye.'); redirect('PLANNING.php?tab='.($left?'review':'prd_pending'));
+    }catch(Throwable $x){ $err=tms_friendly_error($x); }
+  } elseif($action==='create_trip_form'){
+    // "Create Trip" dialog: a load that is not in PRD Pending
+    try{
+      require_once TMS_ROOT.'/app/services/manual_trip.php';
+      $r=manual_trip_create($d,$_POST,(int)($_SESSION['user_id']??0)?:null);
+      setflash('Trip '.$r['code'].' created'.($r['assigned']?' and assigned.':'. Next: choose transporter, vehicle and driver.')); redirect('PLANNING.php?tab=trips&view='.$r['id']);
+    }catch(Throwable $x){ if($d->inTransaction())$d->rollBack(); $err=tms_friendly_error($x); }
+  } elseif($action==='create_plan_trips'){
+    try{
+      $res=plan_create_trips($d,array_map('intval',(array)($_POST['plan_ids']??[])),(string)($_POST['sig']??''),array_map('strval',(array)($_POST['veh']??[])));
+      $codes=array_column($res['trips'],'code'); $pk=array_sum(array_column($res['trips'],'pkt'));
+      setflash(count($codes).' trip(s) ban gaye: '.implode(', ',$codes).' · '.number_format($pk).' PKT.'); redirect('PLANNING.php?tab=trips');
+    }catch(Throwable $x){ $err=tms_friendly_error($x); }
   }
   // ---------- RECORD EDIT / DELETE ----------
   if($action==='edit_indent'){
     try{
-      $id=(int)$_POST['indent_id'];
-      $q=$d->prepare("SELECT * FROM tms_indents WHERE id=?");$q->execute([$id]);$old=$q->fetch(PDO::FETCH_ASSOC);if(!$old)throw new Exception('Indent not found.');
-      if(in_array($old['status'],['Delivered','In Transit'],true))throw new Exception('Delivered/In Transit indent cannot be modified.');
-      $dest=strtolower(trim($_POST['destination']??''));$src=strtolower(trim($_POST['source']??''));$pkt=(int)($_POST['packet_count']??0);$val=(float)str_replace([',','₹',' '],'',($_POST['indent_value']??0));
+      $id=(int)($_POST['indent_id']??0);$d->beginTransaction();
+      $q=$d->prepare("SELECT * FROM tms_indents WHERE id=? FOR UPDATE");$q->execute([$id]);$old=$q->fetch(PDO::FETCH_ASSOC);if(!$old)throw new Exception('Indent not found.');
+      if(in_array($old['status'],['Delivered','In Transit','Cancelled'],true))throw new Exception($old['status'].' indent cannot be modified.');
+      $dest=strtolower(trim((string)($_POST['destination']??'')));$src=strtolower(trim((string)($_POST['source']??'')));$pkt=(int)($_POST['packet_count']??0);$val=(float)str_replace([',','₹',' '],'',(string)($_POST['indent_value']??0));
+      $date=trim((string)($_POST['indent_date']??''));if($date==='')$date=(string)$old['indent_date'];
+      if(!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/',$date,$dm)||!checkdate((int)$dm[2],(int)$dm[3],(int)$dm[1]))throw new Exception('Valid indent date daalo (YYYY-MM-DD).');
       if(!isset($dcByCode[$src]))throw new Exception('Valid Center DC select karo.');if(!isset($storeByCode[$dest]))throw new Exception('Valid destination store select karo.');if($pkt<=0||$val<=0)throw new Exception('Packet aur value required hai.');
-      $tripId=(int)($old['trip_id']??0);$d->beginTransaction();
-      $d->prepare("UPDATE tms_indents SET indent_date=?,source_dc_id=?,destination_store_id=?,packet_count=?,indent_value=?,invoice_no=?,seal_no=? WHERE id=?")->execute([$_POST['indent_date']??$old['indent_date'],(int)$dcByCode[$src]['id'],(int)$storeByCode[$dest]['id'],$pkt,$val,trim($_POST['invoice_no']??'')?:null,trim($_POST['seal_no']??'')?:null,$id]);
+      $newStore=(int)$storeByCode[$dest]['id'];$newDc=(int)$dcByCode[$src]['id'];$tripId=(int)($old['trip_id']??0);
+      $inv=trim((string)($_POST['invoice_no']??''))?:null;$seal=trim((string)($_POST['seal_no']??''))?:null;$stopId=0;
       if($tripId){
-        $d->prepare("UPDATE tms_trip_stops SET store_id=?,packet_count=?,stop_value=? WHERE trip_id=? AND id=(SELECT id FROM tms_trip_stops WHERE trip_id=? AND store_id=? ORDER BY sequence_no LIMIT 1)")->execute([(int)$storeByCode[$dest]['id'],$pkt,$val,$tripId,$tripId,(int)$old['destination_store_id']]);
-        $d->prepare("UPDATE trips SET planned_date=?,source_dc_id=?,total_boxes=(SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?),total_value=(SELECT COALESCE(SUM(stop_value),0) FROM tms_trip_stops WHERE trip_id=?) WHERE id=? AND status='Planned'")->execute([$_POST['indent_date']??$old['indent_date'],(int)$dcByCode[$src]['id'],$tripId,$tripId,$tripId]);
+        // The trip is locked and must still be editable; its stop is found by the indent's current store.
+        $tq=$d->prepare("SELECT id,status,trip_code FROM trips WHERE id=? FOR UPDATE");$tq->execute([$tripId]);$trip=$tq->fetch(PDO::FETCH_ASSOC);
+        if(!$trip||!in_array($trip['status'],['Planned','Assigned','Reached at source','Loaded'],true))throw new Exception('Trip '.($trip['trip_code']??'').' is '.($trip['status']??'missing').'; uska indent ab modify nahi ho sakta.');
+        $sq=$d->prepare("SELECT id,packet_count FROM tms_trip_stops WHERE trip_id=? AND store_id=? ORDER BY sequence_no LIMIT 1");$sq->execute([$tripId,(int)$old['destination_store_id']]);$stop=$sq->fetch(PDO::FETCH_ASSOC);
+        if(!$stop)throw new Exception('Is indent ka stop trip me nahi mila.');$stopId=(int)$stop['id'];
+        $qtyChanged=$newStore!==(int)$old['destination_store_id']||$newDc!==(int)($old['source_dc_id']??0)||$pkt!==(int)$old['packet_count']||abs($val-(float)$old['indent_value'])>0.005||$date!==(string)$old['indent_date'];
+        if($trip['status']==='Loaded'&&$qtyChanged)throw new Exception('Trip '.$trip['trip_code'].' Loaded hai: indent ki quantity/value/store/Center DC/date nahi badal sakte, sirf invoice aur seal no.');
+        if($newStore!==(int)$old['destination_store_id']){$dup=$d->prepare("SELECT 1 FROM tms_trip_stops WHERE trip_id=? AND store_id=? AND id<>?");$dup->execute([$tripId,$newStore,$stopId]);if($dup->fetchColumn())throw new Exception('Ye store is trip me pehle se hai.');}
+        if($newDc!==(int)($old['source_dc_id']??0)){$cn=$d->prepare("SELECT COUNT(*) FROM tms_trip_stops WHERE trip_id=?");$cn->execute([$tripId]);if((int)$cn->fetchColumn()>1)throw new Exception('Multi-store trip ke indent ka Center DC nahi badal sakte. Trip edit karein ya naya trip banayein.');}
+        // PKT limit: trips created before the limits existed may already be over; such an edit is allowed unless it adds PKT beyond the limit.
+        $sm=$d->prepare("SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?");$sm->execute([$tripId]);$curPkt=(int)$sm->fetchColumn();$newPkt=$curPkt-(int)$stop['packet_count']+$pkt;
+        if($newPkt>tms_trip_max_pkt()&&$newPkt>$curPkt)throw new Exception('Trip '.$trip['trip_code']." me $newPkt PKT ho jayenge; ek trip me maximum ".tms_trip_max_pkt().' PKT allowed hai.');
+      }
+      $d->prepare("UPDATE tms_indents SET indent_date=?,source_dc_id=?,destination_store_id=?,packet_count=?,indent_value=?,invoice_no=?,seal_no=? WHERE id=?")->execute([$date,$newDc,$newStore,$pkt,$val,$inv,$seal,$id]);
+      if($tripId){
+        $d->prepare("UPDATE tms_trip_stops SET store_id=?,packet_count=?,stop_value=? WHERE id=? AND trip_id=?")->execute([$newStore,$pkt,$val,$stopId,$tripId]);
+        // Totals follow the stops for every editable trip (not only Planned); a Loaded trip only reaches here with unchanged quantities.
+        $d->prepare("UPDATE trips SET planned_date=?,source_dc_id=?,total_boxes=(SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?),total_value=(SELECT COALESCE(SUM(stop_value),0) FROM tms_trip_stops WHERE trip_id=?) WHERE id=? AND status IN ('Planned','Assigned','Reached at source')")->execute([$date,$newDc,$tripId,$tripId,$tripId]);
       }
       $d->commit();setflash('Indent '.$old['indent_no'].' updated successfully.');redirect('PLANNING.php?tab=indents');
-    }catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    }catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=tms_friendly_error($x);}
   } elseif($action==='delete_indent'){
-    try{$id=(int)$_POST['indent_id'];$q=$d->prepare("SELECT * FROM tms_indents WHERE id=?");$q->execute([$id]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r)throw new Exception('Indent not found.');if(in_array($r['status'],['Delivered','In Transit'],true))throw new Exception('Delivered/In Transit indent cannot be deleted.');$d->beginTransaction();if(!empty($r['trip_id'])){$tid=(int)$r['trip_id'];$d->prepare("DELETE FROM tms_trip_stops WHERE trip_id=? AND store_id=?")->execute([$tid,(int)$r['destination_store_id']]);$d->prepare("UPDATE trips SET total_boxes=(SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?),total_value=(SELECT COALESCE(SUM(stop_value),0) FROM tms_trip_stops WHERE trip_id=?) WHERE id=? AND status='Planned'")->execute([$tid,$tid,$tid]);$left=$d->prepare("SELECT COUNT(*) FROM tms_trip_stops WHERE trip_id=?");$left->execute([$tid]);if((int)$left->fetchColumn()===0){$d->prepare("DELETE FROM tms_trip_status_history WHERE trip_id=?")->execute([$tid]);$d->prepare("DELETE FROM trips WHERE id=? AND status='Planned'")->execute([$tid]);}}$d->prepare("DELETE FROM tms_indents WHERE id=?")->execute([$id]);$d->commit();setflash('Indent deleted successfully.');redirect('PLANNING.php?tab=indents');}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    try{$id=(int)$_POST['indent_id'];$q=$d->prepare("SELECT * FROM tms_indents WHERE id=?");$q->execute([$id]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r)throw new Exception('Indent not found.');if(in_array($r['status'],['Delivered','In Transit'],true))throw new Exception('Delivered/In Transit indent cannot be deleted.');$d->beginTransaction();if(!empty($r['trip_id'])){$tid=(int)$r['trip_id'];$tl=$d->prepare("SELECT status FROM trips WHERE id=? FOR UPDATE");$tl->execute([$tid]);$ts=(string)$tl->fetchColumn();if(!in_array($ts,['Planned','Assigned'],true))throw new Exception("Indent is on a trip that is $ts; it can only be deleted while the trip is Pending or Assigned.");$d->prepare("DELETE FROM tms_trip_stops WHERE trip_id=? AND store_id=?")->execute([$tid,(int)$r['destination_store_id']]);$d->prepare("UPDATE trips SET total_boxes=(SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?),total_value=(SELECT COALESCE(SUM(stop_value),0) FROM tms_trip_stops WHERE trip_id=?) WHERE id=? AND status='Planned'")->execute([$tid,$tid,$tid]);$left=$d->prepare("SELECT COUNT(*) FROM tms_trip_stops WHERE trip_id=?");$left->execute([$tid]);if((int)$left->fetchColumn()===0){$d->prepare("DELETE FROM tms_trip_status_history WHERE trip_id=?")->execute([$tid]);$d->prepare("DELETE FROM trips WHERE id=? AND status='Planned'")->execute([$tid]);}}$d->prepare("DELETE FROM tms_indents WHERE id=?")->execute([$id]);$d->commit();setflash('Indent deleted successfully.');redirect('PLANNING.php?tab=indents');}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
   } elseif($action==='edit_trip'){
     try{
       $id=(int)$_POST['trip_id'];$q=$d->prepare("SELECT * FROM trips WHERE id=?");$q->execute([$id]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r)throw new Exception('Trip not found.');
-      if(in_array($r['status'],['In Transit','Delivered','Gate Pass Created'],true))throw new Exception('Dispatched/Gate Pass/Delivered trip cannot be modified here.');
+      if(!in_array($r['status'],['Planned','Assigned','Reached at source','Loaded'],true))throw new Exception('Only Planned/Assigned/Loaded trip can be modified here (this trip is '.$r['status'].').');
       $date=$_POST['planned_date']??$r['planned_date'];$tpt=trim($_POST['tpt_name']??'');$vehicle=(int)($_POST['vehicle_id']??0);$driver=(int)($_POST['driver_id']??0);
       $stopIds=array_values(array_filter(array_map('intval',$_POST['stop_id']??[])));$storeIds=array_values(array_map('intval',$_POST['store_id']??[]));$pkts=$_POST['stop_packets']??[];$vals=$_POST['stop_values']??[];$indentIds=array_values(array_map('intval',$_POST['indent_id']??[]));
       if(count($storeIds)<1||count($storeIds)>tms_trip_max_stores())throw new Exception('Trip me minimum 1 aur maximum '.tms_trip_max_stores().' stores allowed.');
@@ -55,10 +93,34 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
       $dcQ=$d->prepare("SELECT id,dc_code,latitude,longitude FROM tms_dc_master WHERE id=?");$dcQ->execute([(int)$r['source_dc_id']]);$dcRow=$dcQ->fetch(PDO::FETCH_ASSOC)?:[];
       foreach($storeIds as $sid){ if(empty($storeMap[$sid]['latitude'])&&empty($storeMap[$sid]['longitude'])) throw new Exception('Store '.$storeMap[$sid]['store_code'].' ke latitude/longitude missing hain. Master me coordinates add karo.'); }
       $d->beginTransaction();
+      // Re-read the trip under a lock: only Planned / Assigned / Loaded trips can be edited here.
+      $lk=$d->prepare("SELECT status,vehicle_id,driver_id FROM trips WHERE id=? FOR UPDATE");$lk->execute([$id]);$cur=$lk->fetch(PDO::FETCH_ASSOC);
+      if(!$cur||!in_array($cur['status'],['Planned','Assigned','Reached at source','Loaded'],true))throw new Exception('Sirf Planned/Assigned/Loaded trip modify ho sakta hai (abhi '.($cur['status']??'missing').' hai).');
+      // The edit form posts no TPT / vehicle / driver, so those are only changed when they are actually posted (they used to be wiped on every edit).
+      $setTrip='planned_date=?,dispatch_date=?';$parTrip=[$date,$date];
+      if(isset($_POST['tpt_name'])){$setTrip.=',tpt_name=?';$parTrip[]=$tpt?:null;}
+      if(isset($_POST['vehicle_id'])&&$vehicle!==(int)($cur['vehicle_id']??0)){
+        if($vehicle>0){
+          $vq=$d->prepare("SELECT 1 FROM vehicles WHERE id=? AND active IS TRUE FOR UPDATE");$vq->execute([$vehicle]);if(!$vq->fetchColumn())throw new Exception('Vehicle not found/active.');
+          $bq=$d->prepare("SELECT trip_code FROM trips WHERE vehicle_id=? AND id<>? AND status NOT IN ('Delivered','Cancelled') LIMIT 1");$bq->execute([$vehicle,$id]);if($bq->fetchColumn())throw new Exception('Selected vehicle already assigned to another active Trip.');
+        }
+        if((int)($cur['vehicle_id']??0))$d->prepare("UPDATE vehicles SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$cur['vehicle_id']]);
+        if($vehicle>0&&in_array($cur['status'],['Assigned','Reached at source','Loaded'],true))$d->prepare("UPDATE vehicles SET status='Assigned' WHERE id=?")->execute([$vehicle]);
+        $setTrip.=',vehicle_id=?';$parTrip[]=$vehicle?:null;
+      }
+      if(isset($_POST['driver_id'])&&$driver!==(int)($cur['driver_id']??0)){
+        if($driver>0){
+          $dq=$d->prepare("SELECT 1 FROM drivers WHERE id=? AND active IS TRUE FOR UPDATE");$dq->execute([$driver]);if(!$dq->fetchColumn())throw new Exception('Driver not found/active.');
+          $bq=$d->prepare("SELECT trip_code FROM trips WHERE driver_id=? AND id<>? AND status NOT IN ('Delivered','Cancelled') LIMIT 1");$bq->execute([$driver,$id]);if($bq->fetchColumn())throw new Exception('Selected driver already assigned to another active Trip.');
+        }
+        if((int)($cur['driver_id']??0))$d->prepare("UPDATE drivers SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$cur['driver_id']]);
+        if($driver>0&&in_array($cur['status'],['Assigned','Reached at source','Loaded'],true))$d->prepare("UPDATE drivers SET status='Assigned' WHERE id=?")->execute([$driver]);
+        $setTrip.=',driver_id=?';$parTrip[]=$driver?:null;
+      }
       // Move all existing stop sequence numbers out of the unique-key range before re-numbering.
       // This prevents (trip_id, sequence_no) collisions when stores are reordered/added/removed.
       $d->prepare("UPDATE tms_trip_stops SET sequence_no=1000000+id WHERE trip_id=?")->execute([$id]);
-      $d->prepare("UPDATE trips SET planned_date=?,dispatch_date=?,tpt_name=?,vehicle_id=?,driver_id=? WHERE id=?")->execute([$date,$date,$tpt?:null,$vehicle?:null,$driver?:null,$id]);
+      $parTrip[]=$id;$d->prepare("UPDATE trips SET $setTrip WHERE id=?")->execute($parTrip);
       $oldQ=$d->prepare("SELECT ts.id,ts.store_id,ts.packet_count,ts.stop_value FROM tms_trip_stops ts WHERE ts.trip_id=?");$oldQ->execute([$id]);$oldStops=$oldQ->fetchAll(PDO::FETCH_ASSOC);$oldByStore=[];foreach($oldStops as $os)$oldByStore[(int)$os['store_id']] = $os;
       $keep=[];
       foreach($storeIds as $k=>$sid){
@@ -88,20 +150,23 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
       $params=$keep;$params[]=$id;
       $rel=$d->prepare("SELECT ts.id,ts.store_id FROM tms_trip_stops ts WHERE ts.trip_id=? AND ts.id NOT IN ($keepSql)");
       if($keep){$rel=$d->prepare("SELECT ts.id,ts.store_id FROM tms_trip_stops ts WHERE ts.trip_id=? AND ts.id NOT IN ($keepSql)");$rel->execute(array_merge([$id],$keep));}else{$rel=$d->prepare("SELECT ts.id,ts.store_id FROM tms_trip_stops ts WHERE ts.trip_id=?");$rel->execute([$id]);}
-      foreach($rel->fetchAll(PDO::FETCH_ASSOC) as $rm){$d->prepare("UPDATE tms_indents SET trip_id=NULL,status='Planned' WHERE trip_id=? AND destination_store_id=?")->execute([$id,(int)$rm['store_id']]);$d->prepare("DELETE FROM tms_trip_stops WHERE id=?")->execute([(int)$rm['id']]);}
+      foreach($rel->fetchAll(PDO::FETCH_ASSOC) as $rm){
+        // PRD indents (PRD-T…) of a removed store are cancelled and their challans return to PRD Pending (as dsp_cancel_trip does); manual indents return to Planned.
+        $d->prepare("UPDATE tms_indents SET trip_id=NULL,status=CASE WHEN indent_no LIKE 'PRD-T%' THEN 'Cancelled' ELSE 'Planned' END WHERE trip_id=? AND destination_store_id=?")->execute([$id,(int)$rm['store_id']]);
+        $d->prepare("UPDATE prd_pending p SET planned_trip_id=NULL,planned_at=NULL FROM stores s WHERE s.id=? AND p.planned_trip_id=? AND ((s.oracle_site_code IS NOT NULL AND p.destination_site_code=s.oracle_site_code) OR lower(BTRIM(p.destination_name)) IN (lower(BTRIM(s.store_code)),lower(BTRIM(s.store_name))))")->execute([(int)$rm['store_id'],$id]);$d->prepare("DELETE FROM tms_trip_stops WHERE id=?")->execute([(int)$rm['id']]);}
       $tq=$d->prepare("SELECT COUNT(*),COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?");$tq->execute([$id]);[$stopCnt,$stopPkt]=$tq->fetch(PDO::FETCH_NUM);
       tms_trip_check((int)$stopCnt,(int)$stopPkt,'Trip '.$r['trip_code']);
       $d->prepare("UPDATE trips SET total_boxes=(SELECT COALESCE(SUM(packet_count),0) FROM tms_trip_stops WHERE trip_id=?),total_value=(SELECT COALESCE(SUM(stop_value),0) FROM tms_trip_stops WHERE trip_id=?) WHERE id=?")->execute([$id,$id,$id]);
       $d->commit();setflash('Trip '.$r['trip_code'].' modified successfully — stores added/removed and sequence updated.');redirect('PLANNING.php?tab=trips');
-    }catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    }catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=tms_friendly_error($x);}
   } elseif($action==='delete_trip'){
-    try{$id=(int)$_POST['trip_id'];$q=$d->prepare("SELECT * FROM trips WHERE id=?");$q->execute([$id]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r)throw new Exception('Trip not found.');if(!in_array($r['status'],['Planned','Assigned','Loaded'],true))throw new Exception('Only Planned/Assigned/Loaded trip can be deleted.');$d->beginTransaction();if(!empty($r['vehicle_id']))$d->prepare("UPDATE vehicles SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$r['vehicle_id']]);if(!empty($r['driver_id']))$d->prepare("UPDATE drivers SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$r['driver_id']]);$d->prepare("UPDATE tms_indents SET trip_id=NULL,status='Planned' WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM tms_trip_status_history WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM tms_trip_stops WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM trips WHERE id=?")->execute([$id]);$d->commit();setflash('Trip deleted and its indents released back to Planned.');redirect('PLANNING.php?tab=trips');}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    try{$id=(int)$_POST['trip_id'];$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$id]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r)throw new Exception('Trip not found.');if(!in_array($r['status'],['Planned','Assigned','Reached at source','Loaded'],true))throw new Exception('Only Planned/Assigned/Loaded trip can be deleted.');if(!empty($r['vehicle_id']))$d->prepare("UPDATE vehicles SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$r['vehicle_id']]);if(!empty($r['driver_id']))$d->prepare("UPDATE drivers SET status='Available' WHERE id=? AND status='Assigned'")->execute([(int)$r['driver_id']]);/* Same rules as dsp_cancel_trip: PRD indents (PRD-T…) are cancelled and their challans go back to PRD Pending; manual indents return to Planned. */$d->prepare("UPDATE tms_indents SET trip_id=NULL,status=CASE WHEN indent_no LIKE 'PRD-T%' THEN 'Cancelled' ELSE 'Planned' END WHERE trip_id=?")->execute([$id]);$d->prepare("UPDATE prd_pending SET planned_trip_id=NULL,planned_at=NULL WHERE planned_trip_id=?")->execute([$id]);$d->prepare("UPDATE tms_vehicle_placements SET status='Cancelled',updated_at=CURRENT_TIMESTAMP WHERE trip_id=? AND status IN ('Requested','Confirmed','Placed')")->execute([$id]);$d->prepare("DELETE FROM tms_trip_pickups WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM tms_trip_status_history WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM tms_trip_stops WHERE trip_id=?")->execute([$id]);$d->prepare("DELETE FROM trips WHERE id=?")->execute([$id]);$d->commit();setflash('Trip deleted. PRD challans are back on PRD Pending; manual indents are back to Planned.');redirect('PLANNING.php?tab=trips');}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
   } elseif($action==='edit_gatepass'){
     try{$id=(int)$_POST['gatepass_id'];$q=$d->prepare("SELECT g.*,t.status trip_status FROM tms_gate_passes g JOIN trips t ON t.id=g.trip_id WHERE g.id=?");$q->execute([$id]);$g=$q->fetch(PDO::FETCH_ASSOC);if(!$g)throw new Exception('Gate Pass not found.');if(in_array($g['trip_status'],['In Transit','Delivered'],true))throw new Exception('Dispatched/Delivered Gate Pass cannot be modified.');$d->prepare("UPDATE tms_gate_passes SET invoice_no=?,seal_no=?,remarks=? WHERE id=?")->execute([trim($_POST['invoice_no']??''),trim($_POST['seal_no']??''),trim($_POST['remarks']??''),$id]);setflash('Gate Pass updated successfully.');redirect('PLANNING.php?tab=gatepasses&trip_id='.(int)$g['trip_id']);}catch(Throwable $x){$err=$x->getMessage();}
   } elseif($action==='delete_gatepass'){
-    try{$id=(int)$_POST['gatepass_id'];$q=$d->prepare("SELECT g.*,t.status trip_status,t.id trip_id FROM tms_gate_passes g JOIN trips t ON t.id=g.trip_id WHERE g.id=?");$q->execute([$id]);$g=$q->fetch(PDO::FETCH_ASSOC);if(!$g)throw new Exception('Gate Pass not found.');if(!in_array($g['trip_status'],['Gate Pass Created'],true))throw new Exception('Only Gate Pass Created record can be deleted.');$d->beginTransaction();$d->prepare("DELETE FROM tms_gate_passes WHERE id=?")->execute([$id]);$d->prepare("UPDATE trips SET status='Loaded' WHERE id=? AND status='Gate Pass Created'")->execute([(int)$g['trip_id']]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([(int)$g['trip_id'],'Loaded','Gate Pass deleted / returned to Loaded',$_SESSION['user_id']??null]);$d->commit();setflash('Gate Pass deleted; trip returned to Loaded.');redirect('PLANNING.php?tab=gatepasses&trip_id='.(int)$g['trip_id']);}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    try{$id=(int)$_POST['gatepass_id'];$d->beginTransaction();$q=$d->prepare("SELECT g.*,t.status trip_status,t.id trip_id FROM tms_gate_passes g JOIN trips t ON t.id=g.trip_id WHERE g.id=? FOR UPDATE OF t");$q->execute([$id]);$g=$q->fetch(PDO::FETCH_ASSOC);if(!$g)throw new Exception('Gate Pass not found.');if(!in_array($g['trip_status'],['Gate Pass Created'],true))throw new Exception('Only Gate Pass Created record can be deleted.');$d->prepare("DELETE FROM tms_gate_passes WHERE id=?")->execute([$id]);$d->prepare("UPDATE trips SET status='Loaded' WHERE id=? AND status='Gate Pass Created'")->execute([(int)$g['trip_id']]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([(int)$g['trip_id'],'Loaded','Gate Pass deleted / returned to Loaded',$_SESSION['user_id']??null]);$d->commit();setflash('Gate Pass deleted; trip returned to Loaded.');redirect('PLANNING.php?tab=gatepasses&trip_id='.(int)$g['trip_id']);}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
   } elseif($action==='quick_load_gatepass'){
-    try{$tripId=(int)$_POST['trip_id'];$q=$d->prepare("SELECT * FROM trips WHERE id=?");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if(!in_array($tr['status'],['Assigned','Loaded'],true))throw new Exception('Trip must be Assigned before Gate Pass.');$lp=(int)($tr['loaded_packets']?:$tr['total_boxes']);$lv=(float)($tr['loaded_value']?:$tr['total_value']);if($lp<=0)throw new Exception('Trip has no packets to load.');$d->beginTransaction();$d->prepare("UPDATE trips SET status='Loaded',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);$gp='GP-'.date('ymd').'-'.str_pad((string)$tripId,5,'0',STR_PAD_LEFT);$exists=$d->prepare("SELECT id FROM tms_gate_passes WHERE trip_id=?");$exists->execute([$tripId]);if($exists->fetchColumn())throw new Exception('Gate Pass already exists.');$d->prepare("INSERT INTO tms_gate_passes(gate_pass_no,trip_id,invoice_no,seal_no,packet_count,packet_value,remarks,created_by) VALUES(?,?,?,?,?,?,?,?)")->execute([$gp,$tripId,trim($_POST['invoice_no']??''),trim($_POST['seal_no']??''),$lp,$lv,trim($_POST['remarks']??''),$_SESSION['user_id']??null]);$d->prepare("UPDATE trips SET status='Gate Pass Created' WHERE id=?")->execute([$tripId]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,'Gate Pass Created','Quick Load + Gate Pass',$_SESSION['user_id']??null]);$d->commit();setflash('Gate Pass '.$gp.' created successfully.');redirect('PLANNING.php?tab=gatepasses&trip_id='.$tripId);}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
+    try{$tripId=(int)$_POST['trip_id'];$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if(!in_array($tr['status'],['Reached at source','Loaded'],true))throw new Exception('Mark "Reached at source" first, then load.');$lp=(int)($tr['loaded_packets']?:$tr['total_boxes']);$lv=(float)($tr['loaded_value']?:$tr['total_value']);if($lp<=0)throw new Exception('Trip has no packets to load.');$d->prepare("UPDATE trips SET status='Loaded',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);$gp='GP-'.date('ymd').'-'.str_pad((string)$tripId,5,'0',STR_PAD_LEFT);$exists=$d->prepare("SELECT id FROM tms_gate_passes WHERE trip_id=?");$exists->execute([$tripId]);if($exists->fetchColumn())throw new Exception('Gate Pass already exists.');$d->prepare("INSERT INTO tms_gate_passes(gate_pass_no,trip_id,invoice_no,seal_no,packet_count,packet_value,remarks,created_by) VALUES(?,?,?,?,?,?,?,?)")->execute([$gp,$tripId,trim($_POST['invoice_no']??''),trim($_POST['seal_no']??''),$lp,$lv,trim($_POST['remarks']??''),$_SESSION['user_id']??null]);$d->prepare("UPDATE trips SET status='Gate Pass Created' WHERE id=?")->execute([$tripId]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,'Gate Pass Created','Quick Load + Gate Pass',$_SESSION['user_id']??null]);$d->commit();setflash('Gate Pass '.$gp.' created successfully.');redirect('PLANNING.php?tab=gatepasses&trip_id='.$tripId);}catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=$x->getMessage();}
   }
   if(isset($err) && $err!=='') { /* continue only for a failed record action */ }
   if(in_array($action,['edit_indent','delete_indent','edit_trip','delete_trip','quick_load_gatepass'],true)){ /* handled above */ }
@@ -247,9 +312,8 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
             }
             $pkt=array_sum(array_map(fn($x)=>(int)$x['packet_count'],$route));
             $val=array_sum(array_map(fn($x)=>(float)$x['indent_value'],$route));
-            $seq=$d->query('SELECT COALESCE(MAX(id),0)+1 FROM trips')->fetchColumn();
-            $code='TRP-'.date('ymd').'-'.str_pad((string)$seq,4,'0',STR_PAD_LEFT);
-            $tripId=insert_trip_compat($d,$code,$pkt,$val,$date,(int)$dcId,(int)$route[0]['destination_store_id']);
+            [$newId,$code]=tms_next_trip($d);
+            $tripId=insert_trip_compat($d,$code,$pkt,$val,$date,(int)$dcId,(int)$route[0]['destination_store_id'],$newId);
             $sq=$d->prepare("INSERT INTO tms_trip_stops(trip_id,sequence_no,store_id,packet_count,stop_value,status,expected_delivery_at) VALUES(?,?,?,?,?,'Planned',NULL)");
             $up=$d->prepare("UPDATE tms_indents SET trip_id=?,status='Trip Created',indent_date=? WHERE id=?");
             foreach($route as $n=>$r){$sq->execute([$tripId,$n+1,(int)$r['destination_store_id'],(int)$r['packet_count'],(float)$r['indent_value']]);$up->execute([$tripId,$date,(int)$r['id']]);$createdIndents++;}
@@ -277,9 +341,9 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
         // Manual creation intentionally has NO distance/route restriction. The user can adjust the route later.
         $ordered=$selected; $value=array_sum(array_map(fn($x)=>(float)$x['indent_value'],$ordered)); $pkt=array_sum(array_map(fn($x)=>(int)$x['packet_count'],$ordered));
         tms_trip_check(count($ordered),(int)$pkt,'Manual trip');
-        $seq=$d->query('SELECT COALESCE(MAX(id),0)+1 FROM trips')->fetchColumn();$code='TRP-'.date('ymd').'-'.str_pad((string)$seq,4,'0',STR_PAD_LEFT);
         $d->beginTransaction();
-        $tripId=insert_trip_compat($d,$code,$pkt,$value,$date,$dcId,(int)$ordered[0]['destination_store_id']);
+        [$newId,$code]=tms_next_trip($d);
+        $tripId=insert_trip_compat($d,$code,$pkt,$value,$date,$dcId,(int)$ordered[0]['destination_store_id'],$newId);
         $sq=$d->prepare("INSERT INTO tms_trip_stops(trip_id,sequence_no,store_id,packet_count,stop_value,status,expected_delivery_at) VALUES(?,?,?,?,?,'Planned',NULL)");$up=$d->prepare("UPDATE tms_indents SET trip_id=?,status='Trip Created',indent_date=? WHERE id=?");
         foreach($ordered as $n=>$r){$sq->execute([$tripId,$n+1,(int)$r['destination_store_id'],(int)$r['packet_count'],(float)$r['indent_value']]);$up->execute([$tripId,$date,(int)$r['id']]);}
         $d->prepare('INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)')->execute([$tripId,'Planned','Manual Trip created from selected Indents',$_SESSION['user_id']??null]);
@@ -292,8 +356,8 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
       $d->beginTransaction();
       $trQ=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$trQ->execute([$tripId]);$tr=$trQ->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
       if(!in_array($tr['status'],['Planned','Assigned'],true)) throw new Exception('Sirf Planned/Assigned Trip accept/assign ho sakta hai.');
-      $vr=$d->prepare("SELECT * FROM vehicles WHERE id=? AND active IS TRUE");$vr->execute([$vehicle]);$v=$vr->fetch(PDO::FETCH_ASSOC);if(!$v)throw new Exception('Vehicle not found/active.');
-      $dr=$d->prepare("SELECT * FROM drivers WHERE id=? AND active IS TRUE");$dr->execute([$driver]);$dr=$dr->fetch(PDO::FETCH_ASSOC);if(!$dr)throw new Exception('Driver not found/active.');
+      $vr=$d->prepare("SELECT * FROM vehicles WHERE id=? AND active IS TRUE FOR UPDATE");$vr->execute([$vehicle]);$v=$vr->fetch(PDO::FETCH_ASSOC);if(!$v)throw new Exception('Vehicle not found/active.');
+      $dr=$d->prepare("SELECT * FROM drivers WHERE id=? AND active IS TRUE FOR UPDATE");$dr->execute([$driver]);$dr=$dr->fetch(PDO::FETCH_ASSOC);if(!$dr)throw new Exception('Driver not found/active.');
       if($tpt!=='' && trim((string)($dr['tpt_name']??''))!=='' && strcasecmp($tpt,(string)$dr['tpt_name'])!==0)throw new Exception('Selected driver TPT se match nahi karta.');
       $busyV=$d->prepare("SELECT trip_code FROM trips WHERE vehicle_id=? AND id<>? AND status NOT IN ('Delivered','Cancelled') LIMIT 1");$busyV->execute([$vehicle,$tripId]);if($busyV->fetchColumn())throw new Exception('Selected vehicle already assigned to another active Trip.');
       $busyD=$d->prepare("SELECT trip_code FROM trips WHERE driver_id=? AND id<>? AND status NOT IN ('Delivered','Cancelled') LIMIT 1");$busyD->execute([$driver,$tripId]);if($busyD->fetchColumn())throw new Exception('Selected driver already assigned to another active Trip.');
@@ -311,57 +375,67 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
     }
     elseif($action==='load_trip'){
       $tripId=(int)$_POST['trip_id'];$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
-      if($tr['status']!=='Assigned')throw new Exception('Trip must be Assigned before vehicle load.');
+      if($tr['status']!=='Reached at source')throw new Exception('Mark "Reached at source" first, then load.');
+      tms_trip_require_move('Reached at source','Loaded',(string)$tr['trip_code']);
       $lp=(int)$tr['total_boxes'];$lv=(float)$tr['total_value'];if($lp<=0||$lv<=0)throw new Exception('Trip has no packets/value to load.');if($lp>325||$lv>2700000)throw new Exception('Loaded limit: maximum 325 packets and ₹27 lakh.');
       $d->prepare("UPDATE trips SET status='Loaded',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);
       $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,'Loaded','Vehicle load confirmed from Trip Action',$_SESSION['user_id']??null]);
       $d->commit();setflash('Trip '.$tr['trip_code'].' loaded successfully.');redirect('PLANNING.php?tab=trips&view='.$tripId);
     }
     elseif($action==='confirm_load'){
-      $tripId=(int)$_POST['trip_id'];$tr=$d->prepare("SELECT * FROM trips WHERE id=?");$tr->execute([$tripId]);$tr=$tr->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if($tr['status']!=='Assigned')throw new Exception('Trip must be Assigned before vehicle load.');$lp=(int)$_POST['loaded_packets'];$lv=(float)$_POST['loaded_value'];if($lp<=0||$lp>325||$lv<=0||$lv>2700000)throw new Exception('Loaded limit: maximum 325 packets and ₹27 lakh.');if($lp>(int)$tr['total_boxes']||$lv>(float)$tr['total_value'])throw new Exception('Actual load cannot exceed uploaded trip packet/value.');$d->prepare("UPDATE trips SET status='Loaded',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,created_by) VALUES(?,?,?)")->execute([$tripId,'Loaded',$_SESSION['user_id']??null]);$msg='Vehicle load confirmed.';
+      $tripId=(int)($_POST['trip_id']??0);$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if($tr['status']!=='Reached at source')throw new Exception('Mark "Reached at source" first, then load.');tms_trip_require_move('Reached at source','Loaded',(string)$tr['trip_code']);$lp=(int)($_POST['loaded_packets']??0);$lv=(float)($_POST['loaded_value']??0);if($lp<=0||$lp>325||$lv<=0||$lv>2700000)throw new Exception('Loaded limit: maximum 325 packets and ₹27 lakh.');if($lp>(int)$tr['total_boxes']||$lv>(float)$tr['total_value'])throw new Exception('Actual load cannot exceed uploaded trip packet/value.');$d->prepare("UPDATE trips SET status='Loaded',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,created_by) VALUES(?,?,?)")->execute([$tripId,'Loaded',$_SESSION['user_id']??null]);$d->commit();$msg='Vehicle load confirmed.';
     }
     elseif($action==='create_gatepass'){
-      $tripId=(int)$_POST['trip_id'];$tr=$d->prepare("SELECT * FROM trips WHERE id=?");$tr->execute([$tripId]);$tr=$tr->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if($tr['status']!=='Loaded')throw new Exception('Gate Pass sirf vehicle load confirm hone ke baad create hoga.');
+      $tripId=(int)($_POST['trip_id']??0);$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if($tr['status']!=='Loaded')throw new Exception('Gate Pass sirf vehicle load confirm hone ke baad create hoga.');tms_trip_require_move('Loaded','Gate Pass Created',(string)$tr['trip_code']);
       $exists=$d->prepare("SELECT id FROM tms_gate_passes WHERE trip_id=?");$exists->execute([$tripId]);if($exists->fetchColumn())throw new Exception('Gate Pass already exists.');
-      $path=null;if(!empty($_FILES['gate_file']['tmp_name'])){$ext=strtolower(pathinfo($_FILES['gate_file']['name'],PATHINFO_EXTENSION));if(!in_array($ext,['pdf','jpg','jpeg','png','xlsx','xls'],true))throw new Exception('Gate Pass file only PDF/JPG/PNG/XLS/XLSX allowed.');$dir=TMS_ROOT.'/uploads/gatepass';if(!is_dir($dir))mkdir($dir,0775,true);$fn='GP-'.$tripId.'-'.time().'.'.$ext;move_uploaded_file($_FILES['gate_file']['tmp_name'],$dir.'/'.$fn);$path='uploads/gatepass/'.$fn;}
-      $gp='GP-'.date('ymd').'-'.str_pad((string)$tripId,5,'0',STR_PAD_LEFT);$d->prepare("INSERT INTO tms_gate_passes(gate_pass_no,trip_id,invoice_no,seal_no,packet_count,packet_value,document_path,remarks,created_by) VALUES(?,?,?,?,?,?,?,?,?)")->execute([$gp,$tripId,trim($_POST['invoice_no']),trim($_POST['seal_no']), (int)($tr['loaded_packets']?:$tr['total_boxes']),(float)($tr['loaded_value']?:$tr['total_value']),$path,trim($_POST['remarks']),$_SESSION['user_id']??null]);$d->prepare("UPDATE trips SET status='Gate Pass Created' WHERE id=? AND status='Loaded'")->execute([$tripId]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,created_by) VALUES(?,?,?)")->execute([$tripId,'Gate Pass Created',$_SESSION['user_id']??null]);$msg='Gate Pass created successfully.';redirect('PLANNING.php?tab=gatepasses&trip_id='.$tripId);
+      $path=null;$saved=null;if(!empty($_FILES['gate_file']['tmp_name'])){[$saved,$path]=tms_save_gatepass_file($_FILES['gate_file'],$tripId);}
+      $gp='GP-'.date('ymd').'-'.str_pad((string)$tripId,5,'0',STR_PAD_LEFT);
+      try{
+        $d->prepare("INSERT INTO tms_gate_passes(gate_pass_no,trip_id,invoice_no,seal_no,packet_count,packet_value,document_path,remarks,created_by) VALUES(?,?,?,?,?,?,?,?,?)")->execute([$gp,$tripId,trim((string)($_POST['invoice_no']??'')),trim((string)($_POST['seal_no']??'')), (int)($tr['loaded_packets']?:$tr['total_boxes']),(float)($tr['loaded_value']?:$tr['total_value']),$path,trim((string)($_POST['remarks']??'')),$_SESSION['user_id']??null]);
+        $d->prepare("UPDATE trips SET status='Gate Pass Created' WHERE id=? AND status='Loaded'")->execute([$tripId]);
+        $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,created_by) VALUES(?,?,?)")->execute([$tripId,'Gate Pass Created',$_SESSION['user_id']??null]);
+        $d->commit();
+      }catch(Throwable $e2){ if($saved&&is_file($saved))@unlink($saved); throw $e2; }
+      setflash('Gate Pass created successfully.');redirect('PLANNING.php?tab=gatepasses&trip_id='.$tripId);
     }
-    elseif($action==='trip_operational_update'){
-      $tripId=(int)$_POST['trip_id']; $status=trim($_POST['status']??''); $remarks=trim($_POST['remarks']??'');
-      if(!in_array($status,['In Transit','Breakdown','Accident','Delivered'],true)) throw new Exception('Invalid trip status.');
-      $q=$d->prepare("SELECT * FROM trips WHERE id=?");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
-      if($status==='In Transit' && !in_array($tr['status'],['Gate Pass Created','In Transit','Breakdown','Accident'],true)) throw new Exception('Gate Pass create hone ke baad hi In Transit karein.');
-      $d->beginTransaction();
-      if($status==='In Transit'){
-        $d->prepare("UPDATE trips SET status='In Transit',dispatched_at=COALESCE(dispatched_at,CURRENT_TIMESTAMP) WHERE id=?")->execute([$tripId]);
-        $eq=$d->prepare("SELECT ts.id, COALESCE(s.transit_days,1) transit_days FROM tms_trip_stops ts JOIN stores s ON s.id=ts.store_id WHERE ts.trip_id=? AND ts.status<>'Delivered'"); $eq->execute([$tripId]);
-        foreach($eq->fetchAll(PDO::FETCH_ASSOC) as $es){ $d->prepare("UPDATE tms_trip_stops SET expected_delivery_at=COALESCE(expected_delivery_at,(SELECT dispatched_at FROM trips WHERE id=?)+( ? * interval '1 day')) WHERE id=?")->execute([$tripId,(float)$es['transit_days'],(int)$es['id']]); }
-        if(!empty($tr['vehicle_id']))$d->prepare("UPDATE vehicles SET status='Dispatched' WHERE id=?")->execute([(int)$tr['vehicle_id']]);
-        if(!empty($tr['driver_id']))$d->prepare("UPDATE drivers SET status='Dispatched' WHERE id=?")->execute([(int)$tr['driver_id']]);
-      } elseif($status==='Delivered'){
-        $d->prepare("UPDATE tms_trip_stops SET status='Delivered',delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP),delivery_result=CASE WHEN expected_delivery_at IS NULL OR CURRENT_TIMESTAMP<=expected_delivery_at THEN 'On Time Delivered' ELSE 'Late Delivered' END,delivery_delay_days=CASE WHEN expected_delivery_at IS NULL OR CURRENT_TIMESTAMP<=expected_delivery_at THEN 0 ELSE ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-expected_delivery_at))/86400.0,2) END,delivery_remarks=COALESCE(NULLIF(?,''),delivery_remarks) WHERE trip_id=?")->execute([$remarks,$tripId]);
-        $d->prepare("UPDATE tms_indents SET status='Delivered' WHERE trip_id=?")->execute([$tripId]);
-        $d->prepare("UPDATE trips SET status='Delivered',completed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([$tripId]);
-        if(!empty($tr['vehicle_id']))$d->prepare("UPDATE vehicles SET status='Available' WHERE id=?")->execute([(int)$tr['vehicle_id']]);
-        if(!empty($tr['driver_id']))$d->prepare("UPDATE drivers SET status='Available' WHERE id=?")->execute([(int)$tr['driver_id']]);
-      } else {
-        $d->prepare("UPDATE trips SET status=? WHERE id=?")->execute([$status,$tripId]);
-      }
-      $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,$status,$remarks,$_SESSION['user_id']??null]);
-      $d->commit(); $msg='Trip '.$tr['trip_code'].' status updated to '.$status.'.';
+    elseif($action==='reach_source'){
+      // Step 3: the vehicle has reached the loading point (source DC); loading can start only after this
+      $tripId=(int)($_POST['trip_id']??0);$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
+      if($tr['status']!=='Assigned')throw new Exception('Reached at source sirf Assigned trip par hota hai.');
+      tms_trip_require_move('Assigned','Reached at source',(string)$tr['trip_code']);
+      $d->prepare("UPDATE trips SET status='Reached at source' WHERE id=?")->execute([$tripId]);
+      $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,'Reached at source','Vehicle reached at the source',$_SESSION['user_id']??null]);
+      $d->commit();setflash('Trip '.$tr['trip_code'].': vehicle reached at source. Next: Load.');redirect('PLANNING.php?tab=trips');
+    }
+    elseif($action==='load_gatepass'){
+      // Step 4 in one go: confirm the load (Reached at source -> Loaded) and make the gate pass (Loaded -> Gate Pass Created)
+      $tripId=(int)($_POST['trip_id']??0);$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
+      if($tr['status']!=='Reached at source')throw new Exception('Pehle "Reached at source" mark karein, phir load.');
+      tms_trip_require_move('Reached at source','Loaded',(string)$tr['trip_code']);tms_trip_require_move('Loaded','Gate Pass Created',(string)$tr['trip_code']);
+      $lp=(int)$tr['total_boxes'];$lv=(float)$tr['total_value'];if($lp<=0||$lv<=0)throw new Exception('Trip has no packets/value to load.');
+      $ns=$d->prepare("SELECT COUNT(*) FROM tms_trip_stops WHERE trip_id=?");$ns->execute([$tripId]); // a single big store (single_min_pkt+) is allowed above the combined-trip limit, same rule as when the trip was made
+      if(!((int)$ns->fetchColumn()===1&&$lp>=(int)(app_cfg('trip.single_min_pkt')??400))&&($lp>325||$lv>2700000))throw new Exception('Loaded limit: maximum 325 packets and ₹27 lakh.');
+      $exists=$d->prepare("SELECT id FROM tms_gate_passes WHERE trip_id=?");$exists->execute([$tripId]);if($exists->fetchColumn())throw new Exception('Gate Pass already exists.');
+      $path=null;$saved=null;if(!empty($_FILES['gate_file']['tmp_name'])){[$saved,$path]=tms_save_gatepass_file($_FILES['gate_file'],$tripId);}
+      $gp='GP-'.date('ymd').'-'.str_pad((string)$tripId,5,'0',STR_PAD_LEFT);
+      try{
+        $d->prepare("UPDATE trips SET status='Gate Pass Created',loaded_packets=?,loaded_value=? WHERE id=?")->execute([$lp,$lv,$tripId]);
+        $d->prepare("INSERT INTO tms_gate_passes(gate_pass_no,trip_id,invoice_no,seal_no,packet_count,packet_value,document_path,remarks,created_by) VALUES(?,?,?,?,?,?,?,?,?)")->execute([$gp,$tripId,trim((string)($_POST['invoice_no']??'')),trim((string)($_POST['seal_no']??'')),$lp,$lv,$path,trim((string)($_POST['remarks']??'')),$_SESSION['user_id']??null]);
+        $h=$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)");
+        $h->execute([$tripId,'Loaded','Vehicle load confirmed',$_SESSION['user_id']??null]);$h->execute([$tripId,'Gate Pass Created',$gp,$_SESSION['user_id']??null]);
+        $d->commit();
+      }catch(Throwable $e2){ if($saved&&is_file($saved))@unlink($saved); throw $e2; }
+      setflash('Trip '.$tr['trip_code'].' loaded, gate pass '.$gp.' created. Next: Dispatch.');redirect('PLANNING.php?tab=trips');
     }
     elseif($action==='dispatch_gatepass'){
-      $tripId=(int)$_POST['trip_id'];$tr=$d->prepare("SELECT * FROM trips WHERE id=?");$tr->execute([$tripId]);$tr=$tr->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
+      $tripId=(int)($_POST['trip_id']??0);$d->beginTransaction();$q=$d->prepare("SELECT * FROM trips WHERE id=? FOR UPDATE");$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
       if($tr['status']!=='Gate Pass Created')throw new Exception('Trip must be Gate Pass Created before dispatch.');
-      $d->beginTransaction();$d->prepare("UPDATE trips SET status='In Transit',dispatched_at=COALESCE(dispatched_at,CURRENT_TIMESTAMP) WHERE id=?")->execute([$tripId]);
+      tms_trip_require_move('Gate Pass Created','In Transit',(string)$tr['trip_code']);
+      $d->prepare("UPDATE trips SET status='In Transit',dispatched_at=COALESCE(dispatched_at,CURRENT_TIMESTAMP) WHERE id=?")->execute([$tripId]);
       $eq=$d->prepare("SELECT ts.id, COALESCE(s.transit_days,1) transit_days FROM tms_trip_stops ts JOIN stores s ON s.id=ts.store_id WHERE ts.trip_id=? AND ts.status<>'Delivered'"); $eq->execute([$tripId]);
       foreach($eq->fetchAll(PDO::FETCH_ASSOC) as $es){ $d->prepare("UPDATE tms_trip_stops SET expected_delivery_at=COALESCE(expected_delivery_at,(SELECT dispatched_at FROM trips WHERE id=?)+( ? * interval '1 day')) WHERE id=?")->execute([$tripId,(float)$es['transit_days'],(int)$es['id']]); }
       if(!empty($tr['vehicle_id']))$d->prepare("UPDATE vehicles SET status='Dispatched' WHERE id=?")->execute([(int)$tr['vehicle_id']]);if(!empty($tr['driver_id']))$d->prepare("UPDATE drivers SET status='Dispatched' WHERE id=?")->execute([(int)$tr['driver_id']]);$d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,'In Transit','Dispatched from Gate Pass',$_SESSION['user_id']??null]);$d->commit();$msg='Trip '.$tr['trip_code'].' dispatched and status set to In Transit.';
     }
-    elseif($action==='status_update'){
-      $tripId=(int)$_POST['trip_id'];$status=trim($_POST['status']);$allowed=['In Transit','Breakdown','Accident','Delivered'];if(!in_array($status,$allowed,true))throw new Exception('Invalid status.');$tr=$d->prepare("SELECT * FROM trips WHERE id=?");$tr->execute([$tripId]);$tr=$tr->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');if($status==='Delivered'){ $d->prepare("UPDATE tms_trip_stops SET status='Delivered',delivered_at=CURRENT_TIMESTAMP,delivery_result=CASE WHEN expected_delivery_at IS NULL OR CURRENT_TIMESTAMP<=expected_delivery_at THEN 'On Time Delivered' ELSE 'Late Delivered' END,delivery_delay_days=CASE WHEN expected_delivery_at IS NULL OR CURRENT_TIMESTAMP<=expected_delivery_at THEN 0 ELSE ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-expected_delivery_at))/86400.0,2) END WHERE trip_id=?")->execute([$tripId]);$d->prepare("UPDATE tms_indents SET status='Delivered' WHERE trip_id=?")->execute([$tripId]);$d->prepare("UPDATE trips SET status='Delivered',completed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([$tripId]);$d->prepare("UPDATE vehicles SET status='Available' WHERE id=?")->execute([(int)$tr['vehicle_id']]);$d->prepare("UPDATE drivers SET status='Available' WHERE id=?")->execute([(int)$tr['driver_id']]);}else{$d->prepare("UPDATE trips SET status=? ,dispatched_at=CASE WHEN ?='In Transit' AND dispatched_at IS NULL THEN CURRENT_TIMESTAMP ELSE dispatched_at END WHERE id=?")->execute([$status,$status,$tripId]);if($status==='In Transit'){$d->prepare("UPDATE vehicles SET status='Dispatched' WHERE id=?")->execute([(int)$tr['vehicle_id']]);$d->prepare("UPDATE drivers SET status='Dispatched' WHERE id=?")->execute([(int)$tr['driver_id']]);}}
-      $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId,$status,trim($_POST['remarks']),$_SESSION['user_id']??null]);$msg='Trip status updated to '.$status.'.';
-    }
-  }catch(Throwable $x){$err=$x->getMessage();}
+  }catch(Throwable $x){if($d->inTransaction())$d->rollBack();$err=tms_friendly_error($x);}
   }
 }

@@ -3,6 +3,16 @@
   'use strict';
   const $ = (s) => document.querySelector(s);
 
+  // ---- Live tracking: the portals (R-Track, Gtrac, Eicher) do not allow being embedded in another site, so the live page opens as a
+  // side window next to the TMS. Returns false when the window opened (the link's own navigation is then cancelled).
+  window.tmsTrack = function (url) {
+    const w = Math.min(620, Math.round(screen.availWidth * 0.45)), h = Math.round(screen.availHeight * 0.9);
+    const win = window.open(url, 'tmsTrack', 'popup=yes,width=' + w + ',height=' + h + ',left=' + (screen.availWidth - w - 8) + ',top=20');
+    if (!win) return true;            // popup blocked: let the link open in a normal tab
+    try { win.opener = null; } catch (e) {}
+    return false;
+  };
+
   // ---- Sidebar ----
   window.toggleSide = function () {
     const s = $('#side'); if (!s) return;
@@ -10,6 +20,23 @@
     s.classList.toggle('collapsed');
     try { localStorage.setItem('tms_side_collapsed', s.classList.contains('collapsed') ? '1' : '0'); } catch (e) {}
   };
+  // Collapsible menu groups: the group of the current page is always open, the others remember their last state.
+  (function () {
+    let saved = {}; try { saved = JSON.parse(localStorage.getItem('tms_nav_groups') || '{}') || {}; } catch (e) {}
+    const set = (btn, open) => {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.nextElementSibling?.classList.toggle('shut', !open);
+    };
+    document.querySelectorAll('.nav-group[data-grp]').forEach((btn) => {
+      const items = btn.nextElementSibling, hasActive = !!items?.querySelector('a.active'), g = btn.dataset.grp;
+      set(btn, hasActive || saved[g] === 1 || (saved[g] === undefined && btn.getAttribute('aria-expanded') === 'true'));
+      btn.addEventListener('click', () => {
+        const open = btn.getAttribute('aria-expanded') !== 'true';
+        set(btn, open); saved[g] = open ? 1 : 0;
+        try { localStorage.setItem('tms_nav_groups', JSON.stringify(saved)); } catch (e) {}
+      });
+    });
+  })();
   // Kept for older page scripts; navigation groups are always open now.
   window.togglePlanningSubnav = function () {};
   window.toggleMasterSubnav = function () {};

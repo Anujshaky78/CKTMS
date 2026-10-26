@@ -13,6 +13,8 @@ class Database {
       PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
       PDO::ATTR_EMULATE_PREPARES => false,
     ]);
+    // The PRD board sorts and groups ~90k rows per page: with the 4 MB default Postgres spills the sort to disk.
+    try { $this->pdo->exec("SET work_mem='64MB'"); } catch (Throwable $e) {}
     tms_migrate($this->pdo);
     return $this->pdo;
   }

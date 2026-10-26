@@ -28,6 +28,7 @@ function prd_cfg(): array {
       'club_radius_km' => 80, 'watch_days' => 2, 'critical_days' => 3, 'due_days' => 3, 'use_vehicle_master' => true,
       'fallback_vehicles' => [['type' => '32FT', 'capacity' => 300, 'value_cap' => 2500000]],
       'closed_status_words' => ['closed', 'inactive'],
+      'max_rows' => 500000,
     ];
   }
   return $c;
@@ -54,8 +55,19 @@ function prd_key_sql(string $a = 'p'): string {
   return "md5(COALESCE($a.source_site_code,'')||'|'||lower(BTRIM(COALESCE($a.source_name,'')))||'|'||lower(BTRIM(COALESCE($a.destination_name,''))))";
 }
 /** A row is pending if it is not linked to a live (non-cancelled, existing) trip. */
-function prd_pending_where(string $a = 'p'): string {
-  return "($a.planned_trip_id IS NULL OR NOT EXISTS (SELECT 1 FROM trips tq WHERE tq.id=$a.planned_trip_id AND COALESCE(tq.status,'')<>'Cancelled'))";
+function prd_pending_where(string $a = 'p', bool $ignorePlan = false): string {
+  $trip = "($a.planned_trip_id IS NULL OR NOT EXISTS (SELECT 1 FROM trips tq WHERE tq.id=$a.planned_trip_id AND COALESCE(tq.status,'')<>'Cancelled'))";
+  if ($ignorePlan) return $trip;
+  // also not reserved by a pending plan line
+  return "($trip AND ($a.plan_line_id IS NULL OR NOT EXISTS (SELECT 1 FROM tms_plan_lines pl0 WHERE pl0.id=$a.plan_line_id AND pl0.status='Pending')))";
+}
+/** SQL: the row belongs to a trip that is not cancelled. */
+function prd_on_trip_sql(string $a = 'p'): string {
+  return "($a.planned_trip_id IS NOT NULL AND EXISTS (SELECT 1 FROM trips tq WHERE tq.id=$a.planned_trip_id AND COALESCE(tq.status,'')<>'Cancelled'))";
+}
+/** SQL: the row is reserved by a pending plan line and is not on a trip yet. */
+function prd_in_plan_sql(string $a = 'p'): string {
+  return "(NOT " . prd_on_trip_sql($a) . " AND $a.plan_line_id IS NOT NULL AND EXISTS (SELECT 1 FROM tms_plan_lines pl0 WHERE pl0.id=$a.plan_line_id AND pl0.status='Pending'))";
 }
 
 /** Unicode-safe cut (falls back if mbstring is not enabled). */
@@ -142,11 +154,33 @@ function prd_next_dispatch_day(?string $days): array {
 }
 
 /** Load pending challan lines and aggregate them into Source + Destination groups. */
-function prd_load_groups(PDO $d, ?array $onlyKeys = null): array {
+/** Forget the per-request cache of the full pending list (call after anything that plans, holds or syncs challans). */
+function prd_groups_cache_clear(): void { prd_load_groups_cache(null, true); }
+/** The full (unfiltered) list is loaded once per request: the matrix builds a "separate" and a "joint" board, and loading it twice doubled memory (about 212 MB each for 85k rows). */
+function prd_load_groups_cache(?array $set, bool $clear = false): ?array {
+  static $c = null; if ($clear) { $c = null; return null; } if ($set !== null) $c = $set; return $c;
+}
+/**
+ * $planLineIds: load exactly the challans reserved for these plan lines (still pending in the last sync, not on a trip). Used to turn plans into trips.
+ * Without it, challans reserved by a pending plan are not loaded: they are no longer available on the board.
+ */
+function prd_load_groups(PDO $d, ?array $onlyKeys = null, ?array $planLineIds = null): array {
+  if ($planLineIds !== null) return prd_load_groups_db($d, $onlyKeys, $planLineIds);
+  if ($onlyKeys === null && ($hit = prd_load_groups_cache(null)) !== null) return $hit;
+  $g = prd_load_groups_db($d, $onlyKeys);
+  if ($onlyKeys === null) prd_load_groups_cache($g);
+  return $g;
+}
+function prd_load_groups_db(PDO $d, ?array $onlyKeys = null, ?array $planLineIds = null): array {
   $k = prd_key_sql('p'); $params = [];
+  $where = prd_pending_where('p', $planLineIds !== null);
+  if ($planLineIds !== null) {
+    $lids = array_values(array_unique(array_map('intval', $planLineIds))); if (!$lids) return [];
+    $where .= " AND p.plan_line_id IN (" . implode(',', $lids) . ") AND p.synced_at >= (SELECT MAX(x.synced_at) FROM prd_pending x WHERE x.source_system='ORACLE')";
+  }
   $sql = "SELECT $k AS gkey, p.id, p.source_site_code, p.source_name, p.destination_name, p.state, p.cluster_type, p.store_status, p.sub_div,
             p.challan_no, p.challan_barcode, p.challan_date, p.qty, p.value, p.challan_status, p.last_dispatch_date, p.source_system, p.synced_at, p.destination_site_code
-          FROM prd_pending p WHERE " . prd_pending_where('p') . " AND NULLIF(BTRIM(p.destination_name),'') IS NOT NULL
+          FROM prd_pending p WHERE $where AND NULLIF(BTRIM(p.destination_name),'') IS NOT NULL
             AND p.source_system='ORACLE' AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=?";
   if ($onlyKeys !== null) {
     $onlyKeys = array_values(array_filter($onlyKeys, fn($x) => preg_match('/^[a-f0-9]{32}$/', (string)$x)));
@@ -154,10 +188,14 @@ function prd_load_groups(PDO $d, ?array $onlyKeys = null): array {
     $sql .= " AND $k IN (" . implode(',', array_fill(0, count($onlyKeys), '?')) . ")"; $params = $onlyKeys;
   }
   array_unshift($params, prd_status_filter());
-  $sql .= " ORDER BY p.destination_name, p.challan_no LIMIT 50000";
+  // Safety valve only (the old fixed 50,000 cut stores off the board: A..MCN showed, the rest vanished). If it is ever reached, the board says so.
+  $maxRows = max(1000, (int)(prd_cfg()['max_rows'] ?? 500000));
+  $GLOBALS['prd_truncated'] = false; $nRows = 0;
+  $sql .= " ORDER BY p.destination_name COLLATE \"C\", p.challan_no COLLATE \"C\" LIMIT " . ($maxRows + 1); // "C" = byte order: much faster than the locale sort on 90k rows (the board re-sorts by priority anyway)
   $q = $d->prepare($sql); $q->execute($params);
   $g = [];
   while ($r = $q->fetch(PDO::FETCH_ASSOC)) {
+    if (++$nRows > $maxRows) { $GLOBALS['prd_truncated'] = $maxRows; break; }
     $key = $r['gkey'];
     if (!isset($g[$key])) {
       $g[$key] = ['gkey' => $key, 'source_site_code' => (string)$r['source_site_code'], 'source_name' => trim((string)$r['source_name']),
@@ -225,7 +263,7 @@ function prd_enrich(PDO $d, array $groups): array {
   // Last dispatch per store: dispatched trips first, then indents as fallback.
   $lastTrip = [];
   foreach (prd_safe_rows($d, "SELECT ts.store_id, MAX(COALESCE(t.dispatched_at::date, t.dispatch_date, t.planned_date)) dt FROM tms_trip_stops ts JOIN trips t ON t.id=ts.trip_id
-       WHERE t.status IN ('In Transit','Delivered') GROUP BY ts.store_id") as $r) $lastTrip[(int)$r['store_id']] = $r['dt'];
+       WHERE t.status IN ('In Transit','Delivered','Breakdown','Accident') GROUP BY ts.store_id") as $r) $lastTrip[(int)$r['store_id']] = $r['dt'];
   $lastIndent = [];
   foreach (prd_safe_rows($d, "SELECT i.destination_store_id sid, MAX(i.indent_date) dt FROM tms_indents i LEFT JOIN trips t ON t.id=i.trip_id
        WHERE lower(COALESCE(i.status,'')) IN ('dispatched','in transit','delivered','completed') AND COALESCE(t.status,'')<>'Cancelled' GROUP BY 1") as $r) $lastIndent[(int)$r['sid']] = $r['dt'];
@@ -248,10 +286,13 @@ function prd_enrich(PDO $d, array $groups): array {
     $g['dc_geo'] = ($dc && ((float)$dc['latitude'] || (float)$dc['longitude'])) ? ['lat' => (float)$dc['latitude'], 'lng' => (float)$dc['longitude']] : null;
     $g['dc_km'] = prd_km($g['dc_geo'], $g['geo']);
 
-    // Oracle last invoice date (report LAST_DISP_DATE) first; TMS dispatched trips only when Oracle has none
-    $last = $g['last_dispatch_src'] ?: null; $srcLbl = $last ? 'oracle' : null;
-    if (!$last && $st && !empty($lastTrip[(int)$st['id']])) { $last = $lastTrip[(int)$st['id']]; $srcLbl = 'trip'; }
-    if (!$last && $st && !empty($lastIndent[(int)$st['id']])) { $last = $lastIndent[(int)$st['id']]; $srcLbl = 'indent'; }
+    // Last dispatch = the MOST RECENT of Oracle (report LAST_DISP_DATE), TMS dispatched trips and dispatched indents.
+    // Oracle's date can lag behind a trip TMS dispatched yesterday; taking Oracle first made such a store look
+    // "not dispatched recently", so the low-stock rule (PKT below X and dispatched within N days) did not hold it back.
+    $last = null; $srcLbl = null;
+    foreach ([['oracle', $g['last_dispatch_src'] ?: null], ['trip', $st ? ($lastTrip[(int)$st['id']] ?? null) : null], ['indent', $st ? ($lastIndent[(int)$st['id']] ?? null) : null]] as [$lbl, $dt]) {
+      if ($dt && (!$last || strtotime((string)$dt) > strtotime((string)$last))) { $last = $dt; $srcLbl = $lbl; }
+    }
     $g['last_dispatch'] = $last; $g['last_dispatch_basis'] = $srcLbl;
     $g['gap_days'] = $last ? max(0, (int)floor(($today - strtotime((string)$last)) / 86400)) : null;
     $g['age_days'] = $g['oldest_challan'] ? max(0, (int)floor(($today - strtotime((string)$g['oldest_challan'])) / 86400)) : null;
@@ -505,11 +546,23 @@ function prd_build_board(PDO $d, array $opt = []): array {
  * max PKT, and the remainder can be clubbed with a nearby store.
  * Each trip stop carries the exact PKT keys (challan no. / barcode) it takes.
  */
-function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): array {
+/** Stores that already have an active (not cancelled) trip for today: [store_id => trip_code]. One trip per store per day. */
+function prd_stores_with_trip_today(PDO $d): array {
+  try {
+    return $d->query("SELECT ts.store_id, MIN(t.trip_code) FROM tms_trip_stops ts JOIN trips t ON t.id=ts.trip_id
+      WHERE COALESCE(t.status,'')<>'Cancelled' AND COALESCE(t.planned_date, t.created_at::date)=CURRENT_DATE GROUP BY ts.store_id")->fetchAll(PDO::FETCH_KEY_PAIR);
+  } catch (Throwable $e) { return []; }
+}
+
+function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate', ?array $planLineIds = null, array $opt = []): array {
   $cfg = prd_cfg();
   $joint = $mode === 'joint';
-  // Keys may be joint keys (from the joint board); expand them to source group keys
-  $all = prd_enrich($d, prd_load_groups($d));
+  // $opt (auto trips): 'balance' => spread stores evenly so no store is left alone (10 stores -> 3+3+2+2, not 3+3+3+1);
+  //                    'max_stops' => 2..max (default: config); 'strict' => stores of different clusters never share a trip.
+  $balance = !empty($opt['balance']); $strict = !empty($opt['strict']);
+  // Keys may be joint keys (from the joint board); expand them to source group keys.
+  // With $planLineIds only the challans reserved for those plan lines are considered (plan -> trips).
+  $all = prd_enrich($d, $planLineIds !== null ? prd_load_groups($d, null, $planLineIds) : prd_load_groups($d));
   $byJoint = []; foreach ($all as $k => $g) $byJoint[md5('JOINT|' . strtolower(trim($g['destination_name'])))][] = $k;
   $src = [];
   foreach ($keys as $k) { if (isset($all[$k])) $src[$k] = true; elseif (isset($byJoint[$k])) foreach ($byJoint[$k] as $x) $src[$x] = true; }
@@ -518,7 +571,10 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
   $classes = prd_vehicle_classes($d);
   $maxPkt = function_exists('tms_trip_max_pkt') ? tms_trip_max_pkt() : 300;
   $maxStops = max(1, min((int)$cfg['max_stops'], function_exists('tms_trip_max_stores') ? tms_trip_max_stores() : 2));
+  if (!empty($opt['max_stops'])) $maxStops = max(1, min((int)$opt['max_stops'], function_exists('tms_trip_max_stores') ? tms_trip_max_stores() : 3));
   $radius = (float)$cfg['club_radius_km'];
+  $singleMin = (int)(app_cfg('trip.single_min_pkt') ?? 400);
+  $today = prd_stores_with_trip_today($d);
   $excluded = [];
   if (!$picked && $keys) $excluded[] = ['gkey' => '', 'name' => '—', 'reason' => 'Selected stores are no longer pending (already in a trip or dispatched in Oracle). Refresh the page.'];
 
@@ -527,9 +583,18 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
     if ($g['hold']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'On hold: ' . $g['hold']['reason'] . ($g['hold']['remarks'] ? ' (' . $g['hold']['remarks'] . ')' : '') . '. Release the hold to plan it.']; continue; }
     if (!$g['store']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Not in Store Master. Run Store sync or add the store.']; continue; }
     if ($g['closed']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Store is closed (' . $g['store_status'] . ').']; continue; }
+    // Auto trips low-stock rule, enforced here too (not only in the browser): PKT below X AND dispatched within N days -> no trip, alone or clubbed.
+    if (!empty($opt['low_stock']) && $g['wait_days'] !== null && (int)$g['pkt'] < (int)$opt['low_stock'][0] && (int)$g['wait_days'] < (int)$opt['low_stock'][1]) {
+      $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Low stock: ' . (int)$g['pkt'] . ' PKT (below ' . (int)$opt['low_stock'][0] . ') and ' . ($g['gap_days'] !== null ? 'dispatched ' . (int)$g['gap_days'] . ' day(s) ago' : 'oldest challan only ' . (int)$g['wait_days'] . ' day(s) old') . ' (within ' . (int)$opt['low_stock'][1] . ' days). Trip not created, it waits.']; continue;
+    }
     if ($joint) foreach ($g['parts'] as $pt) if (!$pt['dc']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Source “' . $pt['source'] . '” is not in Center DC master, so a joint pickup cannot be routed.']; continue 2; }
+    // One trip per store per day: a store that already has an active trip today is not planned again.
+    $sid = (int)($g['store']['id'] ?? 0);
+    if ($sid && isset($today[$sid])) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Already on trip ' . $today[$sid] . ' today. A store gets only one trip per day.']; continue; }
+    // A store of at least single_min PKT goes alone with ALL its PKT in one trip (never split); a smaller store only travels combined.
+    if ($maxStops > 1 && $g['pkt'] > $maxPkt && $g['pkt'] < $singleMin) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => $g['pkt'] . ' PKT: too big to combine (limit ' . $maxPkt . ' PKT per combined trip) and below ' . $singleMin . ' PKT, so it cannot go alone either.']; continue; }
     $bucket = $joint ? 'JOINT' : $g['source_site_code'] . '|' . strtolower($g['source_label']);
-    $chunks = array_chunk(array_keys($g['units']), $maxPkt); $n = count($chunks);
+    $chunks = [array_keys($g['units'])]; $n = 1;   // never split a store over two trips
     foreach ($chunks as $i => $ch) {
       $val = 0.0; $qty = 0.0; $parts = [];
       foreach ($ch as $u) {
@@ -540,7 +605,7 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
       $partList = [];
       foreach ($parts as $gk => $pks) $partList[] = ['gkey' => $gk, 'pkts' => ($n > 1 || $joint) ? $pks : null, 'pkt' => count($pks), 'source' => $g['parts'][$gk]['source'] ?? $g['source_label'], 'dc' => $g['parts'][$gk]['dc'] ?? $g['dc']];
       $pid = $k . '#' . $i;
-      $pieces[$pid] = ['gkey' => $k, 'parts' => $partList, 'pkt' => count($ch), 'value' => $val, 'qty' => $qty, 'part' => $n > 1 ? ($i + 1) . '/' . $n : null, 'geo' => $g['geo'], 'state' => $g['state']];
+      $pieces[$pid] = ['gkey' => $k, 'parts' => $partList, 'pkt' => count($ch), 'value' => $val, 'qty' => $qty, 'part' => $n > 1 ? ($i + 1) . '/' . $n : null, 'geo' => $g['geo'], 'state' => $g['state'], 'cluster' => (string)($g['cluster_type'] ?? '')];
       $buckets[$bucket][] = $pid;
     }
   }
@@ -563,22 +628,24 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
       if ($prev && $km !== null) $maxLeg = max($maxLeg, $km);
       if ($pc['geo']) $prev = $pc['geo'];
       $stops[] = ['gkey' => $pc['gkey'], 'parts' => array_map(fn($x) => ['gkey' => $x['gkey'], 'pkts' => $x['pkts'], 'pkt' => $x['pkt'], 'source' => $x['source']], $pc['parts']), 'part' => $pc['part'],
-        'code' => $g['store']['code'], 'name' => $g['store']['name'], 'city' => $g['store']['city'], 'pkt' => $pc['pkt'], 'store_pkt' => $g['pkt'], 'value' => round($pc['value'], 2), 'km' => $km !== null ? round($km) : null, 'due' => $g['due'], 'wait' => $g['wait_days']];
-      if (!$pc['geo']) $warn['geo'] = 'Some stores have no latitude/longitude, so route order and km are approximate.';
+        'code' => $g['store']['code'], 'name' => $g['store']['name'], 'city' => $g['store']['city'], 'cluster' => trim((string)($g['cluster_type'] ?? '')), 'state' => (string)($g['state'] ?? ''), 'has_geo' => (bool)$pc['geo'], 'pkt' => $pc['pkt'], 'store_pkt' => $g['pkt'], 'value' => round($pc['value'], 2), 'km' => $km !== null ? round($km) : null, 'due' => $g['due'], 'wait' => $g['wait_days']];
+      if (!$pc['geo']) $warn['geo'] = 'Route not verified: some stores have no latitude/longitude, so they are grouped by cluster and km is approximate.';
       if ($pc['part']) $warn['split' . $pc['gkey']] = $g['store']['code'] . ' has ' . $g['pkt'] . ' PKT, more than one trip allows, so it is split (part ' . $pc['part'] . ', oldest challans first).';
     }
     if (count($pick) > 1) $warn['joint'] = 'Joint vehicle: collects from ' . implode(' then ', array_map(fn($x) => $x['source'] . ' (' . $x['pkt'] . ' PKT)', $pick)) . ' before delivering.';
     $veh = prd_pick_vehicle($classes, $pkt, $val) ?? end($classes);
     if ($veh['value_cap'] > 0 && $val > $veh['value_cap']) $warn['val'] = 'Value ₹' . number_format($val / 100000, 2) . ' L is above the ' . $veh['type'] . ' value cap ₹' . number_format($veh['value_cap'] / 100000, 2) . ' L.';
+    if ($pkt > $veh['capacity'] && count($stops) === 1) $warn['cap'] = $pkt . ' PKT is more than a ' . $veh['type'] . ' carries (' . $veh['capacity'] . '). Choose a bigger vehicle type for this trip.';
     if ($maxLeg > $radius) $warn['far'] = 'Store-to-store distance is ' . round($maxLeg) . ' km (planning radius ' . round($radius) . ' km).';
     $loads[] = ['source' => implode(' + ', array_map(fn($x) => $x['source'], $pick)), 'dc' => reset($pick)['dc'] ?? $first['dc'], 'pickups' => array_values(array_map(fn($x) => ['dc' => $x['dc'], 'source' => $x['source'], 'pkt' => $x['pkt']], $pick)),
       'joint' => count($pick) > 1, 'stops' => $stops, 'pkt' => $pkt, 'value' => round($val, 2), 'vehicle' => $veh['type'], 'capacity' => $veh['capacity'],
-      'fill' => $veh['capacity'] ? (int)round($pkt * 100 / $veh['capacity']) : 0, 'route_km' => $bo['km'] !== null ? round($bo['km']) : null, 'warnings' => array_values($warn)];
+      'fill' => $veh['capacity'] ? (int)round($pkt * 100 / $veh['capacity']) : 0, 'route_km' => $bo['km'] !== null ? round($bo['km']) : null, 'warnings' => array_values($warn), '_m' => $members];
   };
   foreach ($buckets as $ids) {
     $pool = [];
-    foreach ($ids as $pid) { if ($pieces[$pid]['pkt'] >= $maxPkt || $maxStops === 1) $mk([$pid]); else $pool[$pid] = $pieces[$pid]['pkt'] + ($groups[$pieces[$pid]['gkey']]['due'] ? 1000 : 0); }
+    foreach ($ids as $pid) { if ($pieces[$pid]['pkt'] >= $singleMin || $maxStops === 1) $mk([$pid]); else $pool[$pid] = $pieces[$pid]['pkt'] + ($groups[$pieces[$pid]['gkey']]['due'] ? 1000 : 0); }
     arsort($pool); $left = $pool;   // due stores seed first
+    $sets = [];
     while ($left) {
       $seed = array_key_first($left); unset($left[$seed]);
       $members = [$seed]; $load = $pieces[$seed]['pkt'];
@@ -587,19 +654,81 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
         foreach (array_keys($left) as $c) {
           $pc = $pieces[$c];
           if ($load + $pc['pkt'] > $maxPkt || in_array($pc['gkey'], $used, true)) continue;
+          if ($strict && strtolower(trim($pc['cluster'])) !== strtolower(trim($pieces[$seed]['cluster']))) continue;
           if ($pieces[$seed]['geo'] && $pc['geo']) {
             $dmin = INF; foreach ($members as $m) { $dk = prd_km($pieces[$m]['geo'], $pc['geo']); if ($dk !== null) $dmin = min($dmin, $dk); }
             if ($dmin > $radius * 2) continue;
-            $score = $dmin - $pc['pkt'] / 50;
-          } else $score = 500 + (strcasecmp($pc['state'], $pieces[$seed]['state']) === 0 ? 0 : 300) - $pc['pkt'] / 50;
+            $score = $dmin - $pc['pkt'] / 50 - (strtolower(trim($pc['cluster'])) === strtolower(trim($pieces[$seed]['cluster'])) && $pc['cluster'] !== '' ? 8 : 0);
+          } else {
+            // A store without coordinates cannot be placed on a route: it only joins a load of the SAME CLUSTER.
+            $cl = strtolower(trim($pc['cluster'])); $cs = strtolower(trim($pieces[$seed]['cluster']));
+            if ($cl === '' || $cl === '-' || $cl !== $cs) continue;
+            $score = 500 - $pc['pkt'] / 50;
+          }
           if ($score < $bestScore) { $bestScore = $score; $best = $c; }
         }
         if ($best === null) break;
         $members[] = $best; unset($left[$best]); $load += $pieces[$best]['pkt'];
       }
-      $mk($members);
+      $sets[] = $members;
     }
+    // Balance: a store left alone (e.g. the 10th store when trips take 3) joins a neighbouring trip; if all of those are full, it takes
+    // the nearest store off a full trip, so 10 stores become 3+3+2+2 instead of 3+3+3+1. Limits (max stores, max PKT, clusters) still hold.
+    if ($balance && $maxStops > 1) {
+      $setPkt = fn(array $s) => array_sum(array_map(fn($m) => $pieces[$m]['pkt'], $s));
+      $same = fn($a, $b) => strtolower(trim($pieces[$a]['cluster'])) === strtolower(trim($pieces[$b]['cluster']));
+      $near = function ($a, $b) use (&$pieces, $radius, $strict, $same) {   // km between two pieces, null = may not travel together
+        if ($strict && !$same($a, $b)) return null;
+        if ($pieces[$a]['geo'] && $pieces[$b]['geo']) { $k = prd_km($pieces[$a]['geo'], $pieces[$b]['geo']); return $k !== null && $k <= $radius * 2 ? $k : null; }
+        $c = strtolower(trim($pieces[$a]['cluster'])); return ($c !== '' && $c !== '-' && $same($a, $b)) ? 500.0 : null;
+      };
+      for ($guard = 0; $guard < 200; $guard++) {
+        $done = true;
+        foreach ($sets as $si => $S) {
+          if (count($S) !== 1 || $setPkt($S) >= $maxPkt) continue;
+          $a = $S[0]; $bestMerge = null; $bestMergeD = INF; $bestSteal = null; $bestStealD = INF;
+          foreach ($sets as $ti => $T) {
+            if ($ti === $si) continue;
+            foreach ($T as $x) {
+              if ($pieces[$x]['gkey'] === $pieces[$a]['gkey']) continue 2;
+              $dk = $near($a, $x); if ($dk === null) continue;
+              if (count($T) < $maxStops && $setPkt($T) + $pieces[$a]['pkt'] <= $maxPkt && $dk < $bestMergeD) { $bestMergeD = $dk; $bestMerge = $ti; }
+              if (count($T) === $maxStops && count($T) > 2 && $pieces[$a]['pkt'] + $pieces[$x]['pkt'] <= $maxPkt && $dk < $bestStealD) { $bestStealD = $dk; $bestSteal = [$ti, $x]; }
+            }
+          }
+          if ($bestMerge !== null) { $sets[$bestMerge][] = $a; unset($sets[$si]); $done = false; break; }
+          if ($bestSteal !== null) { [$ti, $x] = $bestSteal; $sets[$ti] = array_values(array_diff($sets[$ti], [$x])); $sets[$si][] = $x; $done = false; break; }
+        }
+        if ($done) break;
+        $sets = array_values($sets);
+      }
+    }
+    foreach ($sets as $members) $mk($members);
   }
+  // Why a store travels alone (shown in the PRD analysis): full load / nothing else selected / too far / would not fit / no coordinates
+  $bucketOf = []; foreach ($buckets as $b => $ids) foreach ($ids as $pid) $bucketOf[$pid] = $b;
+  $drop = [];
+  foreach ($loads as $li => &$ld) {
+    $m = $ld['_m'] ?? []; unset($ld['_m']); $ld['alone'] = null;
+    if (count($m) !== 1) continue;
+    $me = $m[0]; $pc = $pieces[$me]; $near = null; $nearKm = INF; $others = 0;
+    foreach ($buckets[$bucketOf[$me]] ?? [] as $o) {
+      if ($o === $me || $pieces[$o]['gkey'] === $pc['gkey']) continue;
+      $others++; $dk = ($pc['geo'] && $pieces[$o]['geo']) ? prd_km($pc['geo'], $pieces[$o]['geo']) : null;
+      if ($dk !== null && $dk < $nearKm) { $nearKm = $dk; $near = $o; }
+    }
+    if ($pc['pkt'] >= $singleMin) $ld['alone'] = 'Goes alone: ' . $pc['pkt'] . ' PKT (a store of ' . $singleMin . '+ PKT gets its own trip).';
+    elseif ($maxStops === 1) $ld['alone'] = 'Clubbing is off (max 1 store per trip).';
+    elseif (!$others) $ld['alone'] = 'No other selected store from this source to club with.';
+    elseif (!$pc['geo']) $ld['alone'] = 'No latitude/longitude, so it can only club with a store of the same cluster' . ($pc['cluster'] !== '' ? ' (' . $pc['cluster'] . ')' : '') . ' and none fits.';
+    elseif ($near === null) $ld['alone'] = 'The other selected stores have no coordinates, so distance cannot be checked.';
+    elseif ($nearKm > $radius * 2) $ld['alone'] = 'Nearest selected store (' . ($groups[$pieces[$near]['gkey']]['store']['code'] ?? '?') . ') is ' . round($nearKm) . ' km away; clubbing limit is ' . round($radius * 2) . ' km.';
+    else $ld['alone'] = 'Nearest selected store (' . ($groups[$pieces[$near]['gkey']]['store']['code'] ?? '?') . ', ' . round($nearKm) . ' km) is already in another trip or would take it above ' . $maxPkt . ' PKT.';
+    // A store below single_min PKT never gets a trip of its own: it waits until it can be combined.
+    if ($maxStops > 1 && $pc['pkt'] < $singleMin) { $drop[] = $li; $excluded[] = ['gkey' => $pc['gkey'], 'name' => $groups[$pc['gkey']]['store']['code'] ?? $groups[$pc['gkey']]['destination_name'], 'reason' => 'No trip: ' . $pc['pkt'] . ' PKT is below ' . $singleMin . ' PKT, so it can only go combined, and ' . lcfirst((string)$ld['alone'])]; }
+  }
+  unset($ld);
+  foreach ($drop as $li) unset($loads[$li]); $loads = array_values($loads);
   return ['loads' => $loads, 'excluded' => $excluded, 'classes' => array_map(fn($c) => ['type' => $c['type'], 'capacity' => $c['capacity']], $classes),
     'max_stops' => $maxStops, 'max_pkt' => $maxPkt, 'mode' => $joint ? 'joint' : 'separate'];
 }
@@ -687,17 +816,59 @@ function prd_matrix_csv(PDO $d, array $opt): void {
   array_push($h, 'TOTAL_APPS_PKT', 'TOTAL_APPS_VAL', 'TOTAL_GM_PKT', 'TOTAL_GM_VAL', 'TOTAL_PKT', 'TOTAL_VAL', 'DAYS_SINCE_DISPATCH', 'SUGGESTION');
   fputcsv($o, $h);
   $cells = function (array $b) { return [$b['apps_pkt'] ?? 0, round($b['apps_val'] ?? 0, 2), $b['gm_pkt'] ?? 0, round($b['gm_val'] ?? 0, 2), $b['pkt'] ?? 0, round($b['val'] ?? 0, 2)]; };
+  $ot = prd_oracle_totals($d, $m['sites']); // numbers as in Oracle (incl. challans already on trips)
   foreach ($m['rows'] as $r) {
+    $k = strtolower(trim((string)$r['name']));
     $x = [$r['name'], $r['state'], $r['status'], $r['cluster'], $r['last_dispatch'] ?? ''];
-    foreach ($m['sites'] as $sc => $_) array_push($x, ...$cells($r['by'][$sc] ?? []));
-    array_push($x, ...$cells($r));
+    foreach ($m['sites'] as $sc => $_) array_push($x, ...$cells($ot['rows'][$k][(string)$sc] ?? []));
+    array_push($x, ...$cells($ot['rows'][$k]['all'] ?? []));
     array_push($x, $r['wait'] ?? '', implode(' | ', array_map(fn($c) => trim($c['label'] . ' ' . $c['veh']), $r['chips'])));
     fputcsv($o, $x);
   }
   $x = ['GRAND TOTAL', '', '', '', ''];
-  foreach ($m['sites'] as $sc => $_) array_push($x, ...$cells($m['tot'][$sc]));
-  array_push($x, ...$cells($m['tot']['all']));
+  foreach ($m['sites'] as $sc => $_) array_push($x, ...$cells($ot['tot'][(string)$sc]));
+  array_push($x, ...$cells($ot['tot']['all']));
   fputcsv($o, $x); fclose($o);
+}
+
+/**
+ * What Oracle has Pending: every row the LAST sync returned (a sync stamps all its rows with the same synced_at), per store key
+ * (lower-cased destination name) and site, plus totals per site and 'all'. This includes challans that are already on a trip, so the
+ * numbers equal an Oracle report; the planning board itself still plans only what is not on a trip.
+ * @param array $sites keys = site codes to include (the board's sites)
+ * @return array{rows:array,tot:array}
+ */
+function prd_oracle_totals(PDO $d, array $sites): array {
+  $z = ['apps_pkt' => 0, 'apps_val' => 0.0, 'gm_pkt' => 0, 'gm_val' => 0.0, 'pkt' => 0, 'val' => 0.0];
+  $tot = []; foreach ($sites as $sc => $_) $tot[(string)$sc] = $z; $tot['all'] = $z; $rows = [];
+  $pk = prd_pkt_col('p'); $apps = "UPPER(BTRIM(COALESCE(p.sub_div,'')))='APPS'";
+  // These numbers only change when PRD Pending is refreshed, so keep the result per refresh (the COUNT DISTINCT over ~90k rows costs ~0.5 s per page).
+  $ck = 'prd_totals:' . md5(implode(',', array_map('strval', array_keys($sites)))); $stamp = null;   // one cached copy per set of sites
+  try {
+    $stamp = $d->query("SELECT COALESCE(MAX(id),0) || '|' || COALESCE(MAX(created_at)::text,'') FROM tms_sync_log WHERE kind='prd'")->fetchColumn() . '|' . prd_status_filter();
+    $h = $d->prepare("SELECT v FROM tms_meta WHERE k=?"); $h->execute([$ck]); $hit = json_decode((string)$h->fetchColumn(), true);
+    if (is_array($hit) && ($hit['stamp'] ?? null) === $stamp && isset($hit['out']['rows'], $hit['out']['tot'])) return $hit['out'];
+  } catch (Throwable $e) { $stamp = null; }
+  $q = $d->prepare("WITH lt AS (SELECT MAX(synced_at) mx FROM prd_pending WHERE source_system='ORACLE')
+    SELECT lower(BTRIM(p.destination_name)) k, p.source_site_code site,
+           COUNT(DISTINCT $pk) FILTER (WHERE $apps) ap, COALESCE(SUM(p.value) FILTER (WHERE $apps),0) av,
+           COUNT(DISTINCT $pk) FILTER (WHERE NOT $apps) gp, COALESCE(SUM(p.value) FILTER (WHERE NOT $apps),0) gv,
+           COUNT(DISTINCT $pk) pkt, COALESCE(SUM(p.value),0) val
+    FROM prd_pending p CROSS JOIN lt
+    WHERE p.source_system='ORACLE' AND p.synced_at >= lt.mx AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=? AND NULLIF(BTRIM(p.destination_name),'') IS NOT NULL
+    GROUP BY 1,2");
+  $q->execute([prd_status_filter()]);
+  foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $x) {
+    $s = (string)$x['site']; if (!isset($tot[$s])) continue;
+    $a = ['apps_pkt' => (int)$x['ap'], 'apps_val' => (float)$x['av'], 'gm_pkt' => (int)$x['gp'], 'gm_val' => (float)$x['gv'], 'pkt' => (int)$x['pkt'], 'val' => (float)$x['val']];
+    $rows[$x['k']][$s] = $a;
+    foreach ($a as $f => $v) { $tot[$s][$f] += $v; $tot['all'][$f] += $v; $rows[$x['k']]['all'][$f] = ($rows[$x['k']]['all'][$f] ?? 0) + $v; }
+  }
+  $out = ['rows' => $rows, 'tot' => $tot];
+  if ($stamp !== null) {
+    try { $d->prepare("INSERT INTO tms_meta(k,v,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v, updated_at=CURRENT_TIMESTAMP")->execute([$ck, json_encode(['stamp' => $stamp, 'out' => $out])]); } catch (Throwable $e) {}
+  }
+  return $out;
 }
 
 /** CSV export of the board (UTF-8 BOM for Excel). */

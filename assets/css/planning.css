@@ -24,3 +24,6 @@
 .planning-module-content .tab-actions > .modulebar .section-title{display:none}
 .planning-module-content .tab-actions > :not(.modulebar):not(style):not(script){background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:8px}
 .planning-module-content .tab-actions > [style*="display:none"],.planning-module-content .tab-actions > [hidden]{display:none}
+
+html.planning-page .top{margin-bottom:8px;padding-top:8px;padding-bottom:8px}
+.planning-module-content .stats{margin-bottom:8px}.page-alerts .alert{padding:7px 12px;margin-bottom:8px;font-size:12.5px}.planning-module-content .dt-bar{margin-bottom:8px}.planning-module-content .dt-bar .dt-btn,.planning-module-content .dt-search input,.planning-module-content .dt-bar select,.planning-module-content .dt-date{height:34px}.planning-module-content .dt-date input[type=date]{height:30px}

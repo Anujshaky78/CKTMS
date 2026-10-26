@@ -7,6 +7,7 @@ require_once __DIR__ . '/../app/bootstrap.php';
 require_login();
 require_once TMS_ROOT . '/app/services/prd_planner.php';
 require_once TMS_ROOT . '/app/services/trip_service.php';
+require_once TMS_ROOT . '/app/services/plan_service.php';
 $d = db();
 
 // JSON / CSV endpoints for PRD Pending (exit early)
@@ -14,7 +15,8 @@ require TMS_ROOT . '/app/controllers/prd_api.php';
 
 $msg = ''; $err = '';
 $tab = trim((string)($_GET['tab'] ?? 'prd_pending'));
-if (!in_array($tab, ['prd_pending', 'indents', 'trips', 'gatepasses', 'tripstatus'], true)) $tab = 'prd_pending';
+if ($tab === 'indents') $tab = 'review'; // old Indents tab: its job is the Review step now
+if (!in_array($tab, ['prd_pending', 'auto', 'matrix', 'review', 'trips', 'gatepasses', 'tripstatus'], true)) $tab = 'prd_pending';
 
 // Master lookups (needed by actions to resolve Store / DC codes)
 $stores = $d->query("SELECT id,store_code,store_name,latitude,longitude,active,city,state,address,pincode,transit_days FROM stores ORDER BY store_code")->fetchAll(PDO::FETCH_ASSOC);
@@ -40,8 +42,10 @@ head('Planning');
  <section class="planning-module-content">
 <?php
 if ($view && $trip && $tab === 'trips') include TMS_ROOT . '/app/views/planning/trip_detail.php';
-elseif ($tab === 'prd_pending') include TMS_ROOT . '/app/views/planning/prd_pending.php';
-elseif ($tab === 'indents') include TMS_ROOT . '/app/views/planning/indents.php';
+elseif ($tab === 'prd_pending') include TMS_ROOT . '/app/views/planning/desk.php';
+elseif ($tab === 'auto') include TMS_ROOT . '/app/views/planning/auto.php';
+elseif ($tab === 'matrix') include TMS_ROOT . '/app/views/planning/prd_pending.php';
+elseif ($tab === 'review') include TMS_ROOT . '/app/views/planning/review.php';
 elseif ($tab === 'trips') include TMS_ROOT . '/app/views/planning/trips.php';
 elseif ($tab === 'gatepasses') include TMS_ROOT . '/app/views/planning/gatepasses.php';
 elseif ($tab === 'tripstatus') { $_GET['embedded'] = '1'; include __DIR__ . '/TRIP_STATUS.php'; }

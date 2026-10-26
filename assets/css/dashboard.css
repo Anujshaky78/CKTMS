@@ -1,0 +1,71 @@
+/* Dashboard (pages/DASHBOARD.php); tiles and blocks share assets/css/control_tower.css */
+.db{display:flex;flex-direction:column;gap:12px;padding-bottom:20px}
+.db-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.db-q{display:flex;gap:4px}.db-q a{border:1px solid var(--line,#d0d5dd);background:#fff;border-radius:8px;padding:6px 12px;font-size:12px;color:#344054;text-decoration:none}.db-q a:hover{border-color:#98a2b3}
+.db-go{margin-left:auto;font-size:13px;font-weight:600;color:var(--blue,#1d4ed8);text-decoration:none}
+.db-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.db .ct-tile{text-decoration:none;padding:12px 14px}.db .ct-tile b{font-size:30px}.db .ct-tile span{font-size:12px}.db .ct-tile small{font-size:11.5px;white-space:normal}
+.db-grid{display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:10px}.db-grid .db-wide{grid-row:span 2}
+.db .ct-blk{max-height:none;padding:12px 14px}.db .ct-blk h4{font-size:13px;margin-bottom:8px}
+.db-days{height:170px}.db-days .ct-day>div{height:150px}
+.db .ct-ul li{padding:0}.db .ct-ul li a{display:grid;grid-template-columns:auto 1fr auto;gap:8px;padding:5px 0;text-decoration:none;color:inherit}.db .ct-ul li a:hover{background:#f8fafc}
+.db-tables{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.db-t{width:100%;border-collapse:collapse;font-size:12.5px}.db-t th{text-align:left;font-size:11px;color:#667085;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line,#e4e7ec)}.db-t td{padding:6px 8px;border-bottom:1px solid #f2f4f7}
+.db-t .n{text-align:right;font-variant-numeric:tabular-nums}.db-t .bad{color:#b42318;font-weight:700}.db-t small{color:#98a2b3}.db-t .none{text-align:center;color:#98a2b3;padding:16px}
+.db-note{font-size:11.5px;color:#667085;margin:0}
+@media(max-width:1250px){.db-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.db-grid{grid-template-columns:1fr 1fr}.db-grid .db-wide{grid-column:1/-1;grid-row:auto}.db-tables{grid-template-columns:1fr}}
+@media(max-width:700px){.db-grid{grid-template-columns:1fr}}
+
+/* tabs and the blocks of the four tabs */
+.db-tabs{display:flex;gap:4px;background:#f2f4f7;border-radius:10px;padding:3px}
+.db-tabs a{padding:7px 16px;border-radius:8px;font-size:13px;font-weight:600;color:#475467;text-decoration:none}.db-tabs a.on{background:#101828;color:#fff}.db-tabs a:not(.on):hover{background:#e4e7ec}
+.db-t8{grid-template-columns:repeat(4,minmax(0,1fr))}.db-t6{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(min-width:1500px){.db-t8{grid-template-columns:repeat(8,minmax(0,1fr))}.db-t6{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.db-grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.db-grid3 .db-w2{grid-column:span 2}.db-grid3 .db-w3{grid-column:1/-1}
+@media(max-width:1100px){.db-grid3{grid-template-columns:repeat(2,minmax(0,1fr))}.db-grid3 .db-w2,.db-grid3 .db-w3{grid-column:1/-1}}
+@media(max-width:700px){.db-grid3{grid-template-columns:1fr}}
+.db .ct-tile{display:flex}.db div.ct-tile{cursor:default}.db div.ct-tile:hover{border-color:var(--line,#e4e7ec)}
+.db-bars{display:flex;flex-direction:column;gap:5px}
+.db-bar{display:grid;grid-template-columns:minmax(80px,38%) 1fr auto;gap:8px;align-items:center;font-size:12.5px}.db-bar>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#344054}.db-bar>span a{color:inherit;text-decoration:none}
+.db-bar>div{height:9px;background:#eaecf0;border-radius:5px;overflow:hidden}.db-bar u{display:block;height:100%;background:#2563eb;text-decoration:none}.db-bar b{font-variant-numeric:tabular-nums;text-align:right}.db-bar small{grid-column:2/-1;color:#98a2b3;font-size:10.5px;margin-top:-3px}
+.warnbar .db-bar u{background:#f79009}.badbar .db-bar u{background:#f04438}.goodbar .db-bar u{background:#17b26a}.etabar .db-bar:first-child u{background:#f04438}
+.db-cols{display:flex;gap:4px;align-items:flex-end;height:120px}.db-cols>div{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;gap:3px;min-width:0}.db-cols u{display:block;width:70%;min-height:2px;background:#60a5fa;border-radius:3px 3px 0 0;text-decoration:none}.db-cols small{font-size:9.5px;color:#98a2b3;height:11px}
+.db-none{margin:6px 0;color:#98a2b3;font-size:12px}.db .ct-blk h5{margin:10px 0 6px;font-size:11.5px;color:#667085}
+.db-tw{overflow:auto}.db-t td a{color:#1d4ed8;text-decoration:none}.db-t td b{color:#101828}.db-t .warnt,.warnt{color:#b54708;font-weight:700}.db-t .badt,.badt{color:#b42318;font-weight:700}
+.db-pill{display:inline-block;font-size:10.5px;font-weight:700;border-radius:8px;padding:2px 8px;white-space:nowrap}.db-transit{background:#fef0c7;color:#b54708}.db-done{background:#dcfae6;color:#067647}.db-open{background:#f2f4f7;color:#475467}
+.db-score{display:inline-block;min-width:34px;text-align:center;border-radius:8px;padding:2px 6px;font-weight:700;font-size:12px}.db-score.g{background:#dcfae6;color:#067647}.db-score.a{background:#fef0c7;color:#b54708}.db-score.r{background:#fee4e2;color:#b42318}
+.db .ct-bar2{margin:6px 0 0}
+.db-t th[rowspan]{vertical-align:bottom}.db-t th.db-grp,.db-t td.db-grp{border-left:2px solid #e4e7ec}.db-t th.n{text-align:right}.db-t th small{font-weight:400;color:#98a2b3}
+.db-t tr.warnr td{background:#fffaeb}.db-t tr.badr td{background:#fef3f2}.db-t tr.db-totr td{border-top:2px solid #d0d5dd;background:#f8fafc}
+.db-inl{display:inline-block;width:46px;height:6px;background:#eaecf0;border-radius:3px;overflow:hidden;margin-right:6px;vertical-align:middle}.db-inl u{display:block;height:100%;background:#2563eb;text-decoration:none}
+
+/* PRD tab: compact, so the wide tables and the division columns fit */
+.db-prd{gap:8px}.db-prd .db-tiles{gap:8px}.db-prd .ct-tile{padding:8px 11px}.db-prd .ct-tile b{font-size:23px}.db-prd .ct-tile small{font-size:10.5px}
+.db-prd .db-grid3{gap:8px}.db-prd .ct-blk{padding:8px 10px}.db-prd .ct-blk h4{margin-bottom:6px;font-size:12.5px}
+.db-prd .db-t{font-size:11.5px}.db-prd .db-t th{padding:3px 6px;font-size:10px;white-space:nowrap}.db-prd .db-t td{padding:2px 6px;white-space:nowrap;line-height:1.35}.db-prd .db-t small{font-size:10px}
+.db-prd .db-tw{max-height:360px;overflow:auto}.db-prd .db-t thead th{position:sticky;top:0;background:#f8fafc;z-index:1}.db-prd .db-t thead tr:nth-child(2) th{top:22px}
+.db-seg{display:inline-flex;gap:2px;background:#f2f4f7;border-radius:8px;padding:2px;margin:0 0 6px}.db-seg button{border:0;background:transparent;border-radius:6px;padding:3px 12px;font-size:11.5px;cursor:pointer;color:#475467}.db-seg button.on{background:#101828;color:#fff}
+.db-prd .db-note{font-size:11px}
+/* PRD tab, simpler: one headline, one Division switch, slim chips instead of boxes */
+.prd-top{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px;padding:8px 12px}
+.prd-head{margin:0;flex:1 1 420px;font-size:13.5px;line-height:1.45;color:#101828}
+.prd-div{margin:0}.prd-div span{font-size:11px;font-weight:600;color:#667085;padding:0 8px 0 6px;align-self:center}
+.prd-chips{display:flex;flex-wrap:wrap;gap:6px}
+.prd-chip{display:flex;flex-direction:column;background:#fff;border:1px solid var(--line,#e4e7ec);border-left:3px solid #98a2b3;border-radius:8px;padding:4px 10px;min-width:96px;line-height:1.25}
+.prd-chip span{font-size:10px;font-weight:600;color:#667085;text-transform:uppercase;letter-spacing:.02em}.prd-chip b{font-size:15px;color:#101828;white-space:nowrap}
+.prd-chip.warn{border-left-color:#f79009}.prd-chip.bad{border-left-color:#f04438}
+.prd-help{margin:0 0 6px;font-size:11.5px;color:#667085}
+.db-prd .ct-blk h4{font-size:13px}
+/* other tabs: slightly slimmer tiles */
+.db:not(.db-prd) .ct-tile{padding:9px 12px}.db:not(.db-prd) .ct-tile b{font-size:25px}.db:not(.db-prd) .db-tiles{gap:8px}
+
+/* PRD tab: comfortable sizes again, three selectors (Division / Source / Stores) */
+.db-prd{gap:12px}.db-prd .db-grid3{gap:12px}.db-prd .ct-blk{padding:12px 14px}.db-prd .ct-blk h4{font-size:14px;margin-bottom:6px}
+.db-prd .db-t{font-size:13px}.db-prd .db-t th{padding:7px 10px;font-size:11.5px;white-space:nowrap}.db-prd .db-t td{padding:6px 10px;white-space:nowrap;line-height:1.4}.db-prd .db-t small{font-size:11px}
+.db-prd .db-tw{max-height:520px}.db-prd .db-t thead tr:nth-child(2) th{top:31px}
+.db-t th.grp,.db-t td.grp{border-left:2px solid #e4e7ec}.db-t tr.totr td{border-top:2px solid #d0d5dd;background:#f8fafc}.db-t tr.selr td{background:#eff4ff}
+.db-t tr.warnr td{background:#fffaeb}.db-t tr.badr td{background:#fef3f2}
+.prd-top{padding:12px 14px;gap:14px}.prd-head{font-size:15px;line-height:1.5}.prd-head small{color:#667085;font-size:12px}
+.prd-sel{display:flex;gap:10px;flex-wrap:wrap}.prd-sel .db-seg{margin:0;padding:3px}.prd-sel .db-seg span{font-size:11.5px;font-weight:600;color:#667085;padding:0 8px 0 6px;align-self:center}.prd-sel .db-seg button{padding:5px 13px;font-size:12.5px}
+.prd-chips{gap:10px}.prd-chip{padding:8px 16px;min-width:130px;border-radius:10px}.prd-chip span{font-size:11px}.prd-chip b{font-size:19px}
+.prd-help{font-size:12.5px;margin:0 0 8px}.prd-count{margin:6px 0}.db-prd .db-seg button{padding:5px 14px;font-size:12.5px}.db-prd .db-note{font-size:12px}

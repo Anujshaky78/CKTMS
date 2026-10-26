@@ -1,4 +1,6 @@
 <?php
+// The dashboard is no longer in the menu: the app opens on PRD Pending. (The old dashboard code below is kept but not reached.)
+header('Location: PLANNING.php?tab=prd_pending'); exit;
 require_once __DIR__.'/../auth/auth.php';require_once __DIR__.'/../config/DB.php';require_once __DIR__.'/../includes/layout.php';require_login();$d=db();require_once TMS_ROOT.'/app/services/prd_planner.php';
 $d->exec("UPDATE tms_trip_stops ts SET expected_delivery_at=COALESCE(ts.expected_delivery_at,t.dispatched_at + (COALESCE(s.transit_days,1)*interval '1 day')) FROM trips t, stores s WHERE ts.trip_id=t.id AND s.id=ts.store_id AND t.dispatched_at IS NOT NULL AND ts.status<>'Delivered'");
 $k=$d->query("SELECT COUNT(*) trips,COUNT(*) FILTER(WHERE status IN ('Planned','Assigned','Loaded','Gate Pass Created')) queue,COUNT(*) FILTER(WHERE status='In Transit') transit,COUNT(*) FILTER(WHERE status='Delivered') delivered,COUNT(*) FILTER(WHERE status IN ('Breakdown','Accident')) incidents,COALESCE(SUM(total_value),0) value,COALESCE(SUM(total_boxes),0) packets FROM trips")->fetch(PDO::FETCH_ASSOC);

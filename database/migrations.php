@@ -5,7 +5,24 @@ declare(strict_types=1);
  * failing legacy statement never blocks the rest.
  * tms_migrate() runs them only when this file changes (hash stored in tms_meta), instead of on
  * every request as before.
+ *
+ * Every statement goes through tms_mig_exec(): "already exists" / "legacy column or table missing" errors are expected
+ * and ignored, anything else is recorded. tms_migrate() stores the file hash only when nothing unexpected failed
+ * (otherwise it retries at most every 10 minutes and keeps the failures in tms_meta 'schema_errors'), and a
+ * PostgreSQL advisory lock keeps two requests from migrating at the same time.
  */
+
+/** Errors that are normal on a legacy / partly migrated database: duplicate column, table or object; missing column or table; invalid definition. */
+const TMS_MIG_BENIGN = ['42701', '42P07', '42710', '42703', '42P01', '42P16'];
+
+function tms_mig_exec(PDO $d, string $q): void {
+  try { $d->exec($q); }
+  catch (Throwable $e) {
+    $state = ($e instanceof PDOException && isset($e->errorInfo[0])) ? (string)$e->errorInfo[0] : (string)$e->getCode();
+    if (in_array($state, TMS_MIG_BENIGN, true)) return;
+    $GLOBALS['tms_mig_errors'][] = ['state' => $state, 'error' => mb_substr($e->getMessage(), 0, 200), 'sql' => mb_substr(preg_replace('/\s+/', ' ', $q), 0, 160)];
+  }
+}
 
 function ensure_schema(PDO $d): void {
     /*
@@ -112,9 +129,7 @@ function ensure_schema(PDO $d): void {
         "CREATE INDEX IF NOT EXISTS idx_plan_tracking_plan ON plan_tracking(plan_id, recorded_at)"
     ];
 
-    foreach ($sql as $q) {
-        try { $d->exec($q); } catch (Throwable $e) { /* preserve legacy data; continue migration */ }
-    }
+    foreach ($sql as $q) tms_mig_exec($d, $q); // legacy data is preserved; one failing statement does not stop the rest
 
     // Backfill legacy/current order numbering so old delivered orders remain visible.
     $blocks = [
@@ -162,9 +177,7 @@ function ensure_schema(PDO $d): void {
             UPDATE users SET username=COALESCE(NULLIF(username,''),split_part(email,'@',1),'user_'||id) WHERE username IS NULL OR username='';
         EXCEPTION WHEN undefined_table THEN NULL; END $$"
     ];
-    foreach ($blocks as $q) {
-        try { $d->exec($q); } catch (Throwable $e) { /* compatibility only */ }
-    }
+    foreach ($blocks as $q) tms_mig_exec($d, $q);
 }
 
 function tms_migrate_extra(PDO $d): void {
@@ -182,7 +195,7 @@ function tms_migrate_extra(PDO $d): void {
   "ALTER TABLE plan_tracking ADD COLUMN IF NOT EXISTS source VARCHAR(30) DEFAULT 'manual'",
   "CREATE INDEX IF NOT EXISTS idx_vehicles_gps_updated ON vehicles(gps_updated_at)",
   "CREATE INDEX IF NOT EXISTS idx_plan_tracking_latest ON plan_tracking(plan_id, recorded_at DESC)"
- ] as $q){ try{$d->exec($q);}catch(Throwable $e){} }
+ ] as $q){ tms_mig_exec($d,$q); }
 
  // New Planning / Trip Indent workflow. Legacy tables are preserved.
  foreach([
@@ -192,7 +205,7 @@ function tms_migrate_extra(PDO $d): void {
   "DO \$\$ DECLARE c RECORD; BEGIN FOR c IN SELECT conname FROM pg_constraint WHERE conrelid='prd_pending'::regclass AND contype='u' AND pg_get_constraintdef(oid) LIKE 'UNIQUE (challan_no, challan_barcode, destination_name)%' LOOP EXECUTE format('ALTER TABLE prd_pending DROP CONSTRAINT %I',c.conname); END LOOP; END \$\$",
   "ALTER TABLE prd_pending ALTER COLUMN source_site_code SET DEFAULT 'CSV'",
   "ALTER TABLE prd_pending ALTER COLUMN source_site_code SET NOT NULL",
-  "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='prd_pending'::regclass AND conname='prd_pending_dc_challan_unique') THEN ALTER TABLE prd_pending ADD CONSTRAINT prd_pending_dc_challan_unique UNIQUE (source_site_code,challan_no,challan_barcode,destination_name); END IF; END \$\$",
+  // (the old prd_pending_dc_challan_unique constraint is no longer created: tms_migrate_v62() replaces it with the per-division unique index, and the old data cannot satisfy it)
   "CREATE INDEX IF NOT EXISTS idx_prd_pending_source_site_challan ON prd_pending(source_site_code,challan_no)",
   "CREATE INDEX IF NOT EXISTS idx_prd_pending_dest ON prd_pending(destination_name,challan_date)",
   // PRD Pending planning board upgrade
@@ -206,13 +219,17 @@ function tms_migrate_extra(PDO $d): void {
   "ALTER TABLE stores ADD COLUMN IF NOT EXISTS cluster_type VARCHAR(100)",
   "ALTER TABLE stores ADD COLUMN IF NOT EXISTS store_status VARCHAR(100)",
   "ALTER TABLE stores ADD COLUMN IF NOT EXISTS oracle_synced_at TIMESTAMP NULL",
+  "ALTER TABLE stores ADD COLUMN IF NOT EXISTS district VARCHAR(100)",
+  "ALTER TABLE stores ADD COLUMN IF NOT EXISTS store_grade VARCHAR(50)",
+  "ALTER TABLE stores ADD COLUMN IF NOT EXISTS region_type VARCHAR(100)",
+  "ALTER TABLE stores ADD COLUMN IF NOT EXISTS email_id VARCHAR(150)",
+  "ALTER TABLE stores ADD COLUMN IF NOT EXISTS opening_date DATE NULL",
   "ALTER TABLE stores ALTER COLUMN store_code TYPE VARCHAR(60)",
   "ALTER TABLE stores ALTER COLUMN store_name TYPE VARCHAR(150)",
   "CREATE UNIQUE INDEX IF NOT EXISTS uq_stores_oracle_site ON stores(oracle_site_code) WHERE oracle_site_code IS NOT NULL",
   "CREATE TABLE IF NOT EXISTS tms_sync_log (id BIGSERIAL PRIMARY KEY, kind VARCHAR(20) NOT NULL, ok BOOLEAN NOT NULL, message TEXT, row_count INT, created_by INT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
   "CREATE INDEX IF NOT EXISTS idx_tms_sync_log_kind ON tms_sync_log(kind,id DESC)",
   "CREATE TABLE IF NOT EXISTS prd_planner_notes (gkey VARCHAR(40) PRIMARY KEY, source_label VARCHAR(200), destination_name VARCHAR(150), note TEXT, updated_by INT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
-  "CREATE TABLE IF NOT EXISTS tms_dc_master (id SERIAL PRIMARY KEY, dc_code VARCHAR(60) UNIQUE NOT NULL, dc_name VARCHAR(150) NOT NULL, latitude NUMERIC(10,7) DEFAULT 0, longitude NUMERIC(10,7) DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
   "CREATE TABLE IF NOT EXISTS tms_dc_master (id SERIAL PRIMARY KEY, dc_code VARCHAR(60) UNIQUE NOT NULL, dc_name VARCHAR(150) NOT NULL, latitude NUMERIC(10,7) DEFAULT 0, longitude NUMERIC(10,7) DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
   "DROP TRIGGER IF EXISTS aaa_tms_fill_trip_number ON trips",
   "DROP FUNCTION IF EXISTS tms_fill_trip_number()",
@@ -241,11 +258,11 @@ function tms_migrate_extra(PDO $d): void {
   "ALTER TABLE trips ADD COLUMN IF NOT EXISTS loaded_value NUMERIC(14,2) NOT NULL DEFAULT 0",
   "ALTER TABLE trips ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'Planned'",
 "ALTER TABLE trips DROP CONSTRAINT IF EXISTS trips_status_check",
-"UPDATE trips SET status=CASE WHEN status IS NULL OR lower(trim(status)) IN ('planned','draft') THEN 'Planned' WHEN lower(trim(status)) IN ('in-transit','in transit','dispatched') THEN 'In Transit' WHEN lower(trim(status)) IN ('completed','delivered') THEN 'Delivered' WHEN lower(trim(status))='assigned' THEN 'Assigned' WHEN lower(trim(status))='loaded' THEN 'Loaded' WHEN lower(trim(status)) IN ('gate pass created','gatepass created') THEN 'Gate Pass Created' WHEN lower(trim(status))='breakdown' THEN 'Breakdown' WHEN lower(trim(status))='accident' THEN 'Accident' WHEN lower(trim(status))='cancelled' THEN 'Cancelled' ELSE 'Planned' END",
-"ALTER TABLE trips ADD CONSTRAINT trips_status_check CHECK (status IN ('Planned','Assigned','Loaded','Gate Pass Created','In Transit','Breakdown','Accident','Delivered','Cancelled'))",
+"UPDATE trips SET status=CASE WHEN status IS NULL OR lower(trim(status)) IN ('planned','draft') THEN 'Planned' WHEN lower(trim(status)) IN ('in-transit','in transit','dispatched') THEN 'In Transit' WHEN lower(trim(status)) IN ('completed','delivered') THEN 'Delivered' WHEN lower(trim(status))='assigned' THEN 'Assigned' WHEN lower(trim(status))='loaded' THEN 'Loaded' WHEN lower(trim(status)) IN ('gate pass created','gatepass created') THEN 'Gate Pass Created' WHEN lower(trim(status))='breakdown' THEN 'Breakdown' WHEN lower(trim(status))='accident' THEN 'Accident' WHEN lower(trim(status))='cancelled' THEN 'Cancelled' ELSE status END WHERE status IS NULL OR status NOT IN ('Planned','Assigned','Loaded','Gate Pass Created','In Transit','Breakdown','Accident','Delivered','Cancelled')",
+"ALTER TABLE trips ADD CONSTRAINT trips_status_check CHECK (status IN ('Planned','Assigned','Reached at source','Loaded','Gate Pass Created','In Transit','Breakdown','Accident','Delivered','Cancelled'))",
   "CREATE INDEX IF NOT EXISTS idx_tms_indent_status ON tms_indents(status,indent_date)",
   "CREATE INDEX IF NOT EXISTS idx_tms_trip_status ON tms_trip_stops(trip_id,status)"
- ] as $q){ try{$d->exec($q);}catch(Throwable $e){} }
+ ] as $q){ tms_mig_exec($d,$q); }
 }
 
 /** v6: transporters, docks, vehicle placements, joint pickups, store holds. */
@@ -272,7 +289,7 @@ function tms_migrate_v6(PDO $d): void {
     "CREATE TABLE IF NOT EXISTS tms_trip_pickups (id SERIAL PRIMARY KEY, trip_id INT NOT NULL, sequence_no INT NOT NULL, dc_id INT NOT NULL, packet_count INT NOT NULL DEFAULT 0, pickup_value NUMERIC(14,2) NOT NULL DEFAULT 0, UNIQUE(trip_id, sequence_no))",
     "CREATE TABLE IF NOT EXISTS prd_store_holds (id SERIAL PRIMARY KEY, store_key VARCHAR(150) NOT NULL, store_label VARCHAR(150), reason VARCHAR(60) NOT NULL, remarks TEXT, hold_until DATE NULL, created_by INT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, released_at TIMESTAMP NULL, released_by INT NULL)",
     "CREATE INDEX IF NOT EXISTS idx_prd_holds_key ON prd_store_holds(store_key) WHERE released_at IS NULL",
-  ] as $q) { try { $d->exec($q); } catch (Throwable $e) { /* keep going */ } }
+  ] as $q) tms_mig_exec($d, $q);
 }
 
 /**
@@ -296,10 +313,10 @@ function tms_adapt_existing_tables(PDO $d): void {
   foreach ($need as $t => $list) {
     try {
       $have = $cols($t); if (!$have) continue;
-      foreach ($list as $c => $type) if (!isset($have[$c])) { try { $d->exec("ALTER TABLE $t ADD COLUMN IF NOT EXISTS $c $type"); } catch (Throwable $e) {} }
+      foreach ($list as $c => $type) if (!isset($have[$c])) tms_mig_exec($d, "ALTER TABLE $t ADD COLUMN IF NOT EXISTS $c $type");
       if ($t === 'tms_dc_master') continue;
       // Old NOT NULL columns the TMS never fills would block inserts
-      foreach ($have as $c => $r) if (!isset($list[$c]) && $r['is_nullable'] === 'NO' && $r['column_default'] === null) { try { $d->exec("ALTER TABLE $t ALTER COLUMN \"$c\" DROP NOT NULL"); } catch (Throwable $e) {} }
+      foreach ($have as $c => $r) if (!isset($list[$c]) && $r['is_nullable'] === 'NO' && $r['column_default'] === null) { error_log("TMS migration: dropping NOT NULL on $t.$c (legacy column the TMS does not fill)"); tms_mig_exec($d, "ALTER TABLE $t ALTER COLUMN \"$c\" DROP NOT NULL"); }
     } catch (Throwable $e) {}
   }
   // Transporters: backfill name / phone / active from whatever the old table used
@@ -326,20 +343,134 @@ function tms_migrate_v62(PDO $d): void {
     "ALTER TABLE prd_pending DROP CONSTRAINT IF EXISTS prd_pending_dc_challan_unique",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_prd_pending_line ON prd_pending (source_site_code, challan_no, (COALESCE(challan_barcode,'')), destination_name, (COALESCE(sub_div,'')))",
     "CREATE INDEX IF NOT EXISTS idx_prd_pending_src_div ON prd_pending (source_site_code, sub_div)",
-  ] as $q) { try { $d->exec($q); } catch (Throwable $e) {} }
+  ] as $q) tms_mig_exec($d, $q);
+}
+
+/**
+ * v7: one ACTIVE trip per vehicle and per driver (a trip is active until it is Delivered or Cancelled), enforced by the database
+ * so two simultaneous requests cannot book the same vehicle. Only created when no duplicates exist; otherwise the duplicates are
+ * reported in schema_errors and the index is retried on the next run.
+ */
+function tms_migrate_v7(PDO $d): void {
+  foreach ([['uq_trips_active_vehicle', 'vehicle_id'], ['uq_trips_active_driver', 'driver_id']] as [$ix, $col]) {
+    try {
+      $dup = (int)$d->query("SELECT COUNT(*) FROM (SELECT $col FROM trips WHERE $col IS NOT NULL AND status NOT IN ('Delivered','Cancelled') GROUP BY 1 HAVING COUNT(*)>1) x")->fetchColumn();
+    } catch (Throwable $e) { continue; }
+    if ($dup > 0) { $GLOBALS['tms_mig_errors'][] = ['state' => 'TMS01', 'error' => "$dup $col value(s) are on more than one active trip; fix them, then $ix is created automatically", 'sql' => $ix]; continue; }
+    tms_mig_exec($d, "CREATE UNIQUE INDEX IF NOT EXISTS $ix ON trips($col) WHERE $col IS NOT NULL AND status NOT IN ('Delivered','Cancelled')");
+  }
+}
+
+/**
+ * v8: Plans. Ticked PRD stores become ONE plan (tms_plans) with one line per store and source (tms_plan_lines). The challans of a pending
+ * line are reserved for it (prd_pending.plan_line_id) so they leave the PRD board until the plan is cancelled or turned into trips.
+ */
+function tms_migrate_v8(PDO $d): void {
+  foreach ([
+    "CREATE TABLE IF NOT EXISTS tms_plans (id SERIAL PRIMARY KEY, plan_no VARCHAR(40) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by INT NULL, scope VARCHAR(100), status VARCHAR(20) NOT NULL DEFAULT 'Pending', note TEXT)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_tms_plans_no ON tms_plans(plan_no)",
+    "CREATE TABLE IF NOT EXISTS tms_plan_lines (id SERIAL PRIMARY KEY, plan_id INT NOT NULL REFERENCES tms_plans(id) ON DELETE CASCADE, source_site_code VARCHAR(60), source_name VARCHAR(150), gkey VARCHAR(40), store_id INT NULL, store_code VARCHAR(60), store_name VARCHAR(150), destination_name VARCHAR(150), cluster VARCHAR(100), state VARCHAR(100), pkt INT NOT NULL DEFAULT 0, qty NUMERIC(14,2) NOT NULL DEFAULT 0, value NUMERIC(16,2) NOT NULL DEFAULT 0, status VARCHAR(20) NOT NULL DEFAULT 'Pending', trips TEXT, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE INDEX IF NOT EXISTS idx_tms_plan_lines_plan ON tms_plan_lines(plan_id, status)",
+    "ALTER TABLE prd_pending ADD COLUMN IF NOT EXISTS plan_id INT NULL",
+    "ALTER TABLE prd_pending ADD COLUMN IF NOT EXISTS plan_line_id INT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_prd_pending_plan_line ON prd_pending(plan_line_id) WHERE plan_line_id IS NOT NULL",
+  ] as $q) tms_mig_exec($d, $q);
+}
+
+/**
+ * v9: Vehicle types and routes. Types are seeded from the vehicle_type text already on vehicles (that column stays as it is, so
+ * nothing existing is touched). A route is a named, ordered list of stores from one DC.
+ */
+function tms_migrate_v9(PDO $d): void {
+  foreach ([
+    "CREATE TABLE IF NOT EXISTS tms_vehicle_types (id SERIAL PRIMARY KEY, type_name VARCHAR(60) NOT NULL, capacity_pkt INT NOT NULL DEFAULT 300, value_capacity NUMERIC(14,2) NOT NULL DEFAULT 2500000, avg_speed_kmh NUMERIC(6,1) NOT NULL DEFAULT 40, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_tms_vehicle_types_name ON tms_vehicle_types(lower(type_name))",
+    // defaults, not the vehicles' own numbers: one vehicle may carry an odd capacity (e.g. 5000) that must not become the type's norm
+    "INSERT INTO tms_vehicle_types(type_name,capacity_pkt,value_capacity) SELECT DISTINCT vehicle_type, 325, 2500000 FROM vehicles WHERE COALESCE(vehicle_type,'')<>'' ON CONFLICT DO NOTHING",
+    "INSERT INTO tms_vehicle_types(type_name,capacity_pkt) SELECT '24FT',325 WHERE NOT EXISTS (SELECT 1 FROM tms_vehicle_types)",
+    "CREATE TABLE IF NOT EXISTS tms_routes (id SERIAL PRIMARY KEY, route_code VARCHAR(30) NOT NULL, route_name VARCHAR(120) NOT NULL, dc_id INT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_tms_routes_code ON tms_routes(upper(route_code))",
+    "CREATE TABLE IF NOT EXISTS tms_route_stops (route_id INT NOT NULL REFERENCES tms_routes(id) ON DELETE CASCADE, seq INT NOT NULL, store_id INT NOT NULL, PRIMARY KEY (route_id, seq))",
+  ] as $q) tms_mig_exec($d, $q);
+}
+
+/** v10: the Create Indent dialog's extra fields on indents (all optional). */
+function tms_migrate_v10(PDO $d): void {
+  foreach ([
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(60) NULL",
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS route_id INT NULL",
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS transporter_id INT NULL",
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS expiry_at TIMESTAMP NULL",
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS reporting_at TIMESTAMP NULL",
+    "ALTER TABLE tms_indents ADD COLUMN IF NOT EXISTS notes TEXT NULL",
+    // latest GPS data per vehicle and source, read from the exported G-TRAC / R-TRAC reports (app/services/tracking.php)
+    "CREATE TABLE IF NOT EXISTS tms_vehicle_tracking (id SERIAL PRIMARY KEY, vehicle_number VARCHAR(40) NOT NULL, source VARCHAR(20) NOT NULL, vehicle_id INT NULL, gps_time TIMESTAMP NULL, location TEXT, speed NUMERIC(7,2), ignition VARCHAR(10), status VARCHAR(30), halted_since TIMESTAMP NULL, yesterday_km NUMERIC(9,2), fuel NUMERIC(9,2), driver_name VARCHAR(120), driver_phone VARCHAR(15), day_km NUMERIC(9,2), avg_speed NUMERIC(7,2), max_speed NUMERIC(7,2), motion_min INT, idle_min INT, stop_min INT, start_address TEXT, end_address TEXT, first_ignition TIMESTAMP NULL, last_ignition TIMESTAMP NULL, report_from TIMESTAMP NULL, report_to TIMESTAMP NULL, imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(vehicle_number, source))",
+    "CREATE INDEX IF NOT EXISTS idx_vtrk_vehicle ON tms_vehicle_tracking(vehicle_id)",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS loc_time TIMESTAMP NULL",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS lat NUMERIC(10,7) NULL",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS lng NUMERIC(10,7) NULL",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS start_lat NUMERIC(10,7) NULL",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS start_lng NUMERIC(10,7) NULL",
+    "ALTER TABLE tms_vehicle_tracking ADD COLUMN IF NOT EXISTS trail TEXT NULL",
+    // address -> coordinates cache, so a position that is only known as text can be drawn on the trip map (one lookup per new address)
+    "CREATE TABLE IF NOT EXISTS tms_geocache (addr_key CHAR(32) PRIMARY KEY, address TEXT NOT NULL, lat NUMERIC(10,7) NULL, lng NUMERIC(10,7) NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+    // vehicle tracking: where the gaadi is tracked (Eicher / R-Track / Gtrac / FASTag) and the portal's live "share location" link
+    "ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tracking_source VARCHAR(30)",
+    "ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tracking_url TEXT",
+    // transporter KYC details; vehicle type body size and tonnage
+    "ALTER TABLE tms_transporters ADD COLUMN IF NOT EXISTS owner_name VARCHAR(120)",
+    "ALTER TABLE tms_transporters ADD COLUMN IF NOT EXISTS address TEXT",
+    "ALTER TABLE tms_transporters ADD COLUMN IF NOT EXISTS aadhaar_no VARCHAR(12)",
+    "ALTER TABLE tms_transporters ADD COLUMN IF NOT EXISTS pan_no VARCHAR(10)",
+    "ALTER TABLE tms_vehicle_types ADD COLUMN IF NOT EXISTS capacity_ton NUMERIC(7,2)",
+    "ALTER TABLE tms_vehicle_types ADD COLUMN IF NOT EXISTS length_ft NUMERIC(6,2)",
+    "ALTER TABLE tms_vehicle_types ADD COLUMN IF NOT EXISTS breadth_ft NUMERIC(6,2)",
+    "ALTER TABLE tms_vehicle_types ADD COLUMN IF NOT EXISTS height_ft NUMERIC(6,2)",
+  ] as $q) tms_mig_exec($d, $q);
 }
 
 function tms_migrate(PDO $d, bool $force = false): void {
   $hash = md5_file(__FILE__) . '|' . (is_file(__DIR__ . '/../config/prd_planning.php') ? '1' : '0');
   try {
     $d->exec("CREATE TABLE IF NOT EXISTS tms_meta (k VARCHAR(60) PRIMARY KEY, v TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
-    if (!$force) { $q = $d->prepare("SELECT v FROM tms_meta WHERE k='schema_hash'"); $q->execute(); if ($q->fetchColumn() === $hash) return; }
+    if (!$force) {
+      $q = $d->prepare("SELECT v FROM tms_meta WHERE k='schema_hash'"); $q->execute(); if ($q->fetchColumn() === $hash) return;
+      // A previous run of this exact file hit unexpected errors: retry at most every 10 minutes, not on every request.
+      $q = $d->prepare("SELECT 1 FROM tms_meta WHERE k='schema_retry' AND v=? AND updated_at > CURRENT_TIMESTAMP - interval '10 minutes'"); $q->execute([$hash]); if ($q->fetchColumn()) return;
+    }
   } catch (Throwable $e) { /* run migrations anyway */ }
-  ensure_schema($d);
-  tms_migrate_extra($d);
-  tms_adapt_existing_tables($d);
-  tms_migrate_v6($d);
-  tms_adapt_existing_tables($d);
-  tms_migrate_v62($d);
-  try { $d->prepare("INSERT INTO tms_meta(k,v,updated_at) VALUES('schema_hash',?,CURRENT_TIMESTAMP) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v,updated_at=CURRENT_TIMESTAMP")->execute([$hash]); } catch (Throwable $e) {}
+
+  // One request migrates at a time; the others carry on with the schema as it is.
+  $locked = true;
+  try { $locked = (bool)$d->query("SELECT pg_try_advisory_lock(727001)")->fetchColumn(); } catch (Throwable $e) {}
+  if (!$locked) return;
+  $GLOBALS['tms_mig_errors'] = [];
+  try {
+    ensure_schema($d);
+    tms_migrate_extra($d);
+    tms_adapt_existing_tables($d);
+    tms_migrate_v6($d);
+    tms_adapt_existing_tables($d);
+    tms_migrate_v62($d);
+    tms_migrate_v7($d);
+    tms_migrate_v8($d);
+    tms_migrate_v9($d);
+    tms_migrate_v10($d);
+  } finally {
+    try { $d->query("SELECT pg_advisory_unlock(727001)"); } catch (Throwable $e) {}
+  }
+
+  $errs = $GLOBALS['tms_mig_errors'];
+  $meta = "INSERT INTO tms_meta(k,v,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) ON CONFLICT(k) DO UPDATE SET v=EXCLUDED.v,updated_at=CURRENT_TIMESTAMP";
+  try {
+    if (!$errs) {
+      $d->prepare($meta)->execute(['schema_hash', $hash]);
+      $d->exec("DELETE FROM tms_meta WHERE k IN ('schema_errors','schema_retry')");
+    } else {
+      // Hash is NOT stored, so the migration is tried again later. The failures are kept in tms_meta 'schema_errors' and the PHP error log.
+      error_log('TMS migration: ' . count($errs) . ' unexpected error(s), first: ' . json_encode($errs[0]));
+      $d->prepare($meta)->execute(['schema_errors', json_encode(array_slice($errs, 0, 20))]);
+      $d->prepare($meta)->execute(['schema_retry', $hash]);
+    }
+  } catch (Throwable $e) {}
 }

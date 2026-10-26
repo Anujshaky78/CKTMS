@@ -5,7 +5,7 @@
 return [
   // Planner ke liye max stores per trip. Hard limit config/app.php ke trip.max_stores se aata hai
   // (dono me jo kam ho wahi lagta hai).
-  'max_stops'       => 2,
+  'max_stops'       => 3,
 
   // Single store ka PKT, sabse badi gaadi ki capacity ka itna % ya zyada ho to direct FTL
   'ftl_fill_pct'    => 85,
@@ -24,6 +24,11 @@ return [
   'critical_days'   => 3,
   // Isse zyada din wait karne wale stores highlight + 'Dispatch now' suggest (kam fill par bhi)
   'due_days'        => 3,
+
+  // Auto trips: "low stock" store = PKT is kam isse AND last dispatch itne din ke andar hua ho -> uska trip nahi banta
+  // (na akela, na kisi aur trip me). Desk ke Auto trips panel me ye default values hain.
+  'low_stock_pkt'   => 100,
+  'low_stock_days'  => 3,
 
   // true = Vehicle Master (vehicles table) se gaadi types aur capacity lo.
   // Master khali ho to neeche wali fallback list use hogi.
