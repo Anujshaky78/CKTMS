@@ -27,7 +27,7 @@ function prd_cfg(): array {
       'max_stops' => 4, 'ftl_fill_pct' => 85, 'min_fill_pct' => 60, 'target_fill_pct' => 95,
       'club_radius_km' => 80, 'watch_days' => 2, 'critical_days' => 3, 'due_days' => 3, 'use_vehicle_master' => true,
       'fallback_vehicles' => [['type' => '32FT', 'capacity' => 300, 'value_cap' => 2500000]],
-      'closed_status_words' => ['closed', 'inactive'],
+      'closed_status_words' => ['closed', 'inactive'], 'enforce_min_fill' => true,
     ];
   }
   return $c;
@@ -499,6 +499,20 @@ function prd_build_board(PDO $d, array $opt = []): array {
 }
 
 /**
+ * Low-fill rule shared by the plan preview and trip creation: a load below min_fill_pct of its vehicle
+ * is held (no trip) unless a store in it is overdue / critical. Returns the reason, or null when OK.
+ */
+function prd_low_fill_reason(int $pkt, array $veh, bool $critical): ?string {
+  $cfg = prd_cfg();
+  if (empty($cfg['enforce_min_fill']) || $critical) return null;
+  $cap = (int)($veh['capacity'] ?? 0); if ($cap <= 0) return null;
+  $min = (float)$cfg['min_fill_pct']; $fill = round($pkt * 100 / $cap);
+  if ($fill >= $min) return null;
+  $need = max(1, (int)ceil($cap * $min / 100) - $pkt);
+  return 'Only ' . $pkt . ' PKT = ' . (int)$fill . '% of ' . ($veh['type'] ?? 'vehicle') . ' (minimum ' . (int)$min . '%). Needs ' . $need . ' more PKT. Hold & consolidate, trip not created.';
+}
+
+/**
  * Turn a user selection (any number of stores, any DCs) into ready-to-create trips that obey the
  * business limits: max PKT per trip and max stores per trip (config/app.php).
  * A store with more PKT than one trip allows is split FIFO (oldest challans first): full trips of
@@ -546,7 +560,7 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
   }
 
   $loads = [];
-  $mk = function (array $members) use (&$pieces, &$groups, $classes, $radius, &$loads, $joint) {
+  $mk = function (array $members) use (&$pieces, &$groups, $classes, $radius, &$loads, &$excluded, $joint) {
     $first = $groups[$pieces[$members[0]]['gkey']];
     // pickups: DCs involved, biggest first
     $pick = [];
@@ -569,6 +583,8 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate'): arr
     }
     if (count($pick) > 1) $warn['joint'] = 'Joint vehicle: collects from ' . implode(' then ', array_map(fn($x) => $x['source'] . ' (' . $x['pkt'] . ' PKT)', $pick)) . ' before delivering.';
     $veh = prd_pick_vehicle($classes, $pkt, $val) ?? end($classes);
+    $critical = (bool)array_filter($members, fn($m) => !empty($groups[$pieces[$m]['gkey']]['due']) || ($groups[$pieces[$m]['gkey']]['urgency'] ?? '') === 'critical');
+    if ($low = prd_low_fill_reason($pkt, $veh, $critical)) { foreach ($stops as $st) $excluded[] = ['gkey' => $st['gkey'], 'name' => $st['name'], 'reason' => $low]; return; }
     if ($veh['value_cap'] > 0 && $val > $veh['value_cap']) $warn['val'] = 'Value ₹' . number_format($val / 100000, 2) . ' L is above the ' . $veh['type'] . ' value cap ₹' . number_format($veh['value_cap'] / 100000, 2) . ' L.';
     if ($maxLeg > $radius) $warn['far'] = 'Store-to-store distance is ' . round($maxLeg) . ' km (planning radius ' . round($radius) . ' km).';
     $loads[] = ['source' => implode(' + ', array_map(fn($x) => $x['source'], $pick)), 'dc' => reset($pick)['dc'] ?? $first['dc'], 'pickups' => array_values(array_map(fn($x) => ['dc' => $x['dc'], 'source' => $x['source'], 'pkt' => $x['pkt']], $pick)),

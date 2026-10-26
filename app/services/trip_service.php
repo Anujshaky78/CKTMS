@@ -159,6 +159,8 @@ function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $
   }
   $packets = 0; $value = 0.0; foreach ($byStore as $x) foreach ($x['parts'] as $pt) { $packets += $pt['pkt']; $value += $pt['value']; }
   tms_trip_check(count($byStore), $packets);
+  $critical = (bool)array_filter(array_column($byStore, 'g'), fn($g) => ($g['urgency'] ?? '') === 'critical');
+  if ($low = prd_low_fill_reason($packets, prd_pick_vehicle(prd_vehicle_classes($d), $packets, $value) ?? ['capacity' => 0], $critical)) throw new Exception($low);
   if (!isset($pick[$dcId])) throw new Exception('Chosen loading DC is trip ke kisi store ka source nahi hai.');
   // pickup order: chosen DC first, then the rest by size
   $order = array_keys($pick); usort($order, fn($a, $b) => ($a === $dcId ? -1 : ($b === $dcId ? 1 : $pick[$b]['pkt'] <=> $pick[$a]['pkt'])));

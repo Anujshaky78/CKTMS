@@ -13,6 +13,10 @@ return [
   // Club / PTL plan isse kam fill ho to "Hold & consolidate" (overdue stores ko chhod kar)
   'min_fill_pct'    => 60,
 
+  // true = jo load min_fill_pct se kam fill ho (aur koi store due/critical na ho) uska trip nahi banta;
+  // Review plan me "left out" dikhta hai aur create bhi block hota hai. false = purana behaviour.
+  'enforce_min_fill' => true,
+
   // Club banate waqt itna fill ho jaye to aur store add karna band
   'target_fill_pct' => 95,
 
