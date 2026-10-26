@@ -3,6 +3,11 @@
 // Included from pages/PLANNING.php. Needs $d, $dcs, e(), csrf().
 require_once TMS_ROOT . '/app/services/prd_planner.php';
 require_once TMS_ROOT . '/app/services/oracle_sync.php';
+// The board refreshes only when someone clicks Refresh: that starts a background run and redirects here with ?syncing=<time>.
+// The progress banner shows while a run is going on (or just started, with no finished run since the click).
+$__lastSyncId = (int)$d->query("SELECT COALESCE(MAX(id),0) FROM tms_sync_log WHERE kind='prd'")->fetchColumn();
+$__stamp = (int)($_GET['syncing'] ?? 0); $__syncing = tms_sync_running($d);
+if (!$__syncing && $__stamp > 0 && time() - $__stamp < 180) { $__fin = $d->prepare("SELECT 1 FROM tms_sync_log WHERE kind='prd' AND created_at >= to_timestamp(?) LIMIT 1"); $__fin->execute([$__stamp]); $__syncing = !$__fin->fetchColumn(); }
 $vo = prd_view_opts($_GET); if ($vo['wh'] === 'joint') $vo = ['mode' => 'separate', 'site' => null, 'wh' => 'all'];
 $sug = ($_GET['sug'] ?? '') === 'separate' ? 'separate' : 'joint';
 $M = prd_matrix($d, ['site' => $vo['site'], 'sug' => $sug]);
@@ -13,18 +18,22 @@ foreach ($S as $sc => $l) $allSites[$sc] = $l;
 foreach ($allSites as $sc => $l) if ($l === $sc) { $q = $d->prepare("SELECT MAX(source_name) FROM prd_pending WHERE source_site_code=?"); $q->execute([$sc]); $allSites[$sc] = $q->fetchColumn() ?: $sc; }
 $os = tms_oracle_status($d, 'prd');
 $fmtT = fn($t) => $t ? date('d M, H:i', strtotime((string)$t)) : '';
-$syncBtn = ['no_oci8' => 'Set up Oracle', 'not_configured' => 'Connect Oracle', 'never' => 'Load from Oracle', 'ok' => 'Refresh from Oracle', 'failed' => 'Retry Oracle sync'][$os['state']];
-$syncLine = ['no_oci8' => 'OCI8 extension not enabled', 'not_configured' => 'Oracle login not set', 'never' => 'Not synced yet',
-  'ok' => 'Synced ' . $fmtT($os['last']['created_at'] ?? null), 'failed' => 'Sync failed ' . $fmtT($os['last']['created_at'] ?? null)][$os['state']];
+$syncBtn = ['no_oci8' => 'Set up', 'not_configured' => 'Connect', 'never' => 'Refresh', 'ok' => 'Refresh', 'failed' => 'Retry refresh'][$os['state']];
+$syncLine = ['no_oci8' => 'OCI8 extension not enabled', 'not_configured' => 'Source login not set', 'never' => 'Not refreshed yet',
+  'ok' => 'Refreshed ' . $fmtT($os['last']['created_at'] ?? null), 'failed' => 'Refresh failed ' . $fmtT($os['last']['created_at'] ?? null)][$os['state']];
 $L = fn($v) => $v >= 10000000 ? number_format($v / 10000000, 2) . ' Cr' : ($v >= 100000 ? number_format($v / 100000, 2) . ' L' : number_format((float)$v, 0));
 $N = fn($v) => $v ? number_format((float)$v) : '<span class="z">–</span>';
 $V = fn($v) => $v ? $L($v) : '<span class="z">–</span>';
-$q = fn(array $over) => 'PLANNING.php?' . http_build_query(array_merge(['tab' => 'prd_pending', 'wh' => $vo['wh'], 'sug' => $sug], $over));
+$q = fn(array $over) => 'PLANNING.php?' . http_build_query(array_merge(['tab' => 'matrix', 'wh' => $vo['wh'], 'sug' => $sug], $over));
 $states = []; $clusters = []; foreach ($R as $r) { if ($r['state'] !== '') $states[$r['state']] = 1; if ($r['cluster'] !== '') $clusters[$r['cluster']] = 1; } ksort($states); ksort($clusters);
 $chipTypes = []; foreach ($R as $r) foreach ($r['chips'] as $c) $chipTypes[$c['type']] = $c['type'] === 'CLUB' ? 'Club load' : preg_replace('/ L\d+$/', '', $c['label']);
 $js = []; foreach ($R as $id => $r) $js[$id] = ['keys' => $r['keys'], 'pkt' => $r['pkt'], 'val' => round($r['val'], 2), 'name' => $r['name'], 'sites' => array_keys($r['by'])];
 $token = csrf();
 $nSites = count($S);
+// DISPLAYED numbers = what Oracle has Pending: every row the last sync returned, per store and site, including challans that are already on a trip.
+// ($R / $js / the dock keep using only what is still left to plan; $Tplan holds those totals.)
+$Tplan = $T; $__tz = ['apps_pkt' => 0, 'apps_val' => 0.0, 'gm_pkt' => 0, 'gm_val' => 0.0, 'pkt' => 0, 'val' => 0.0];
+$__o = prd_oracle_totals($d, $S); $__ot = $__o['rows']; $T = $__o['tot'];
 ?>
 <style>
 .px{--ink:#101828;--sub:#5b6b80;--line:#e3e8ef;--soft:#f7f8fa;--blue:#1f4fd8;--red:#b42318;--amber:#b54708;--green:#067647}
@@ -86,6 +95,25 @@ $nSites = count($S);
 .px-det .acts input{flex:1;min-width:200px;height:30px;border:1px solid #d0d5dd;border-radius:6px;padding:4px 8px;font-size:12px}
 .px-det table{border-collapse:collapse;font-size:11px;width:100%}.px-det table th,.px-det table td{border-bottom:1px solid #eef1f5;padding:4px 8px 4px 0;text-align:left;position:static;background:none}
 .px-det .ch{max-height:260px;overflow:auto}
+/* selection analysis: cluster chips above the board, analysis panel above the dock */
+.cl-chips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;align-items:center}.cl-chips .lbl{font-size:12px;color:var(--sub);font-weight:600}
+.cl-chip{border:1px solid var(--line);background:#fff;border-radius:99px;padding:5px 12px;font-size:12px;cursor:pointer;display:inline-flex;gap:6px;align-items:baseline;color:#344054}
+.cl-chip b{color:var(--ink)}.cl-chip small{color:var(--sub)}.cl-chip:hover{border-color:#98a2b3}.cl-chip.on{background:#eff4ff;border-color:#1d4ed8;color:#1d4ed8}.cl-chip.part{border-style:dashed;border-color:#1d4ed8}
+.px-dw{position:sticky;bottom:0;z-index:6;margin-top:10px}.px-dw .px-dock{position:static;margin-top:0}
+.an{background:#fff;border:1px solid var(--line);border-radius:12px 12px 0 0;box-shadow:0 -8px 24px rgba(16,24,40,.10);margin-bottom:-6px;padding-bottom:6px}
+.an[hidden]{display:none}
+.an-bar{display:flex;gap:14px;align-items:center;padding:9px 14px;cursor:pointer;flex-wrap:wrap}.an-bar b{font-size:13px}.an-bar .sum{font-size:12.5px;color:#344054;flex:1}.an-bar .sum i{font-style:normal;color:var(--sub)}
+.an-bar .tg{font-size:12px;color:#1d4ed8;font-weight:600}.an-bar .wait{font-size:12px;color:var(--sub)}
+.an-body{max-height:min(52vh,460px);overflow:auto;border-top:1px solid var(--line);padding:10px 14px}
+.an-tabs{display:flex;gap:4px;margin:0 0 10px}.an-tabs button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 12px;font-size:12.5px;cursor:pointer;color:#475467}.an-tabs button.on{background:#101828;color:#fff;border-color:#101828}
+.an-kpi{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 10px}.an-kpi div{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:6px 12px}.an-kpi b{display:block;font-size:16px}.an-kpi span{font-size:11px;color:var(--sub)}
+.an-trip{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:0 0 8px}.an-trip.alone{background:#fffaf0}
+.an-th{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;margin-bottom:6px;flex-wrap:wrap}.an-th .f{font-weight:700}.an-th .f.low{color:#b54708}.an-th .f.over{color:#b42318}
+.an-path{display:flex;flex-wrap:wrap;align-items:center;gap:4px 0}.an-st{background:#eff4ff;border:1px solid #c7d7fe;border-radius:8px;padding:3px 9px;font-size:12px;color:#1e3a8a;white-space:nowrap}.an-st small{color:#475467}.an-st em{font-style:normal;color:#667085;font-size:11px;margin-left:4px}
+.an-hop{font-size:11px;color:var(--sub);padding:0 8px;white-space:nowrap}.an-hop::before{content:"";display:inline-block;width:12px;border-top:2px solid #cbd5e1;vertical-align:middle;margin-right:4px}
+.an-why{font-size:12px;color:#93590c;margin-top:5px}.an-ok{font-size:12px;color:#067647;margin-top:5px}
+.an-tbl{border-collapse:collapse;width:100%;font-size:12.5px}.an-tbl th,.an-tbl td{padding:6px 10px;border-bottom:1px solid #eef1f5;text-align:left}.an-tbl th{font-size:11.5px;color:var(--sub);font-weight:600}.an-tbl .n{text-align:right;font-variant-numeric:tabular-nums}
+.an-excl{background:#fffaeb;border:1px solid #fedf89;border-radius:8px;padding:8px 12px;font-size:12.5px;margin:0 0 10px}.an-excl ul{margin:4px 0 0;padding-left:18px}
 /* dock */
 .px-dock{position:sticky;bottom:0;z-index:6;margin-top:10px;background:var(--ink);color:#fff;border-radius:12px;padding:10px 14px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;box-shadow:0 -8px 24px rgba(16,24,40,.12)}
 .px-dock .k{font-size:10px;color:#9fb0c6}.px-dock .v{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums}
@@ -129,19 +157,55 @@ $nSites = count($S);
 </style>
 
 <div class="px" id="pbRoot">
+<?php if ($__syncing): ?>
+<div id="syncBanner" role="status" style="display:flex;gap:10px;align-items:center;margin:0 0 10px;padding:10px 14px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;font-size:13px">
+  <style>@keyframes tmsSpin{to{transform:rotate(360deg)}}</style>
+  <span id="syncSpin" style="width:14px;height:14px;border:2px solid #93c5fd;border-top-color:#1d4ed8;border-radius:50%;animation:tmsSpin .8s linear infinite;flex:none"></span>
+  <span><b>Refreshing…</b> <span id="syncTxt">The latest pending data is being loaded. This board reloads by itself when it is done (about a minute).</span></span>
+</div>
+<script>(function(){
+  var last=<?= (int)$__lastSyncId ?>, t0=Date.now(), idle=0, b=document.getElementById('syncBanner'), tx=document.getElementById('syncTxt'), sp=document.getElementById('syncSpin');
+  function fail(m){ b.style.background='#fef2f2'; b.style.borderColor='#fecaca'; b.style.color='#991b1b'; sp.style.display='none'; tx.textContent=m; }
+  function poll(){
+    fetch('PLANNING.php?tab=prd_pending&sync_status=1',{credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}}).then(function(r){return r.json();}).then(function(s){
+      if(s.running){ idle=0; }
+      else if(s.last_id>last){ if(s.last_ok){ location.replace('PLANNING.php?tab=prd_pending'); return; } fail('Refresh failed: '+s.last_message+' (the board shows the last good data).'); return; }
+      else if(++idle>8){ fail('The refresh did not start. The board shows the last good data; click Refresh again.'); return; }
+      if(Date.now()-t0>600000){ fail('The sync is taking too long. The board shows the last good data.'); return; }
+      setTimeout(poll,3000);
+    }).catch(function(){ setTimeout(poll,5000); });
+  }
+  setTimeout(poll,3000);
+})();</script>
+<?php endif; ?>
+<?php if (!empty($GLOBALS['prd_truncated'])): ?><div class="alert alert-err" role="alert"><b>Board is incomplete:</b> only the first <?= number_format((int)$GLOBALS['prd_truncated']) ?> pending rows were loaded, so some stores are missing. Raise <code>'max_rows'</code> in config/prd_planning.php.</div><?php endif; ?>
 <div class="px-head">
   <div class="px-stats">
     <?php foreach ($S as $sc => $lbl): $t = $T[$sc]; ?><span title="<?= e($lbl) ?>"><b><?= e($sc) ?></b> <?= number_format($t['pkt']) ?> PKT · ₹<?= $L($t['val']) ?></span><?php endforeach; ?>
     <?php if ($nSites > 1): ?><span class="all"><b>Total</b> <?= number_format($T['all']['pkt']) ?> PKT · ₹<?= $L($T['all']['val']) ?></span><?php endif; ?>
+    <?php // Complete count. The board lists only PKT that still need a trip. PKT already on a trip are not on the board; those that the LAST sync
+          // still returned are Pending in Oracle, those it did not return were dispatched in Oracle and only linger on their trip.
+      $__pk = prd_pkt_col('p');
+      // "returned by the last sync" = synced_at equals the newest sync time (one sync stamps every row with the same time).
+      $__q = $d->prepare("WITH lt AS (SELECT MAX(synced_at) mx FROM prd_pending WHERE source_system='ORACLE')
+        SELECT COUNT(DISTINCT $__pk) FILTER (WHERE " . prd_on_trip_sql('p') . " AND p.synced_at >= lt.mx) in_trips,
+               COUNT(DISTINCT $__pk) FILTER (WHERE " . prd_in_plan_sql('p') . " AND p.synced_at >= lt.mx) in_plans,
+               COUNT(DISTINCT $__pk) FILTER (WHERE " . prd_on_trip_sql('p') . " AND p.synced_at < lt.mx) gone,
+               COUNT(DISTINCT $__pk) FILTER (WHERE p.synced_at >= lt.mx) all_pkt
+        FROM prd_pending p CROSS JOIN lt WHERE p.source_system='ORACLE' AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=?");
+      $__q->execute([prd_status_filter()]); $__c = $__q->fetch(PDO::FETCH_ASSOC) ?: ['in_trips' => 0, 'in_plans' => 0, 'gone' => 0, 'all_pkt' => 0]; ?>
+    <span title="Part of the PKT shown above: still Pending in Oracle, but already on a trip, so they cannot be planned again."><b><?= number_format((int)$__c['in_trips']) ?></b> PKT already in trips</span>
+    <?php if ((int)$__c['in_plans'] > 0): ?><span title="Part of the PKT shown above: waiting on the Review trips page, so they are not on this board. Cancel the plan to bring them back."><b><?= number_format((int)$__c['in_plans']) ?></b> PKT in pending plans</span><?php endif; ?>
+    <span title="Part of the PKT shown above that is not on any trip yet: this is what the dock / Review plan works with."><b><?= number_format((int)$Tplan['all']['pkt']) ?></b> PKT left to plan</span>
+    <?php if ((int)$__c['gone'] > 0): ?><span class="bad" title="These PKT sit on a trip in TMS, but the last Oracle sync did not return them: they were dispatched in Oracle already. They are NOT part of 'All pending'. Check those trips (Trips tab)."><b><?= number_format((int)$__c['gone']) ?></b> PKT on trips already dispatched</span><?php endif; ?>
     <span><b><?= number_format(count($R)) ?></b> stores</span>
     <?php if ($M['due']): ?><span class="bad"><b><?= $M['due'] ?></b> not dispatched > <?= (int)$cfg['due_days'] ?> days</span><?php endif; ?>
     <?php if ($M['held']): ?><span><b><?= $M['held'] ?></b> on hold</span><?php endif; ?>
-    <?php $vs = []; foreach ($M['demand'] as $v) if ($v['need']) $vs[] = $v['need'] . '× ' . $v['type']; if ($vs): ?><span>Vehicles: <b><?= e(implode(', ', $vs)) ?></b></span><?php endif; ?>
   </div>
   <div class="px-sync">
     <span class="st <?= $os['state'] === 'ok' ? 'ok' : (in_array($os['state'], ['failed', 'no_oci8', 'not_configured'], true) ? 'bad' : '') ?>" title="<?= e($os['last']['message'] ?? '') ?>"><i></i><?= e($syncLine) ?></span>
     <?php if (in_array($os['state'], ['no_oci8', 'not_configured'], true)): ?><a class="btn light" href="../SETUP_ORACLE.txt" target="_blank">How to connect</a>
-    <?php else: ?><form method="post" onsubmit="setTimeout(function(){window.showAppBusy&&showAppBusy('Fetching pending challans from Oracle','This can take a minute…')},0)"><input type="hidden" name="action" value="sync_prd_oracle"><button class="btn <?= $os['state'] === 'failed' ? 'retry' : 'success' ?>"><?= e($syncBtn) ?></button></form><?php endif; ?>
+    <?php elseif (can('plan')): ?><form method="post" onsubmit="setTimeout(function(){window.showAppBusy&&showAppBusy('Starting the refresh','One moment…')},0)"><input type="hidden" name="action" value="sync_prd_oracle"><button class="btn <?= $os['state'] === 'failed' ? 'retry' : 'success' ?>"><?= e($syncBtn) ?></button></form><?php endif; ?>
     <a class="btn light" href="<?= e($q(['export' => 'prd_matrix'])) ?>" data-no-busy>Export</a>
   </div>
 </div>
@@ -159,6 +223,7 @@ $nSites = count($S);
   <span class="px-count" id="pxCount"></span>
 </div>
 
+<div class="cl-chips" id="clChips" aria-label="Select a whole cluster"></div>
 <div class="px-wrap">
 <?php if (!$R): ?><div style="padding:50px;text-align:center;color:var(--sub)"><b>No pending challans.</b><br><?= in_array($os['state'], ['no_oci8', 'not_configured'], true) ? 'Connect Oracle first.' : 'Click “' . e($syncBtn) . '”. Challans already in a trip are not shown.' ?></div>
 <?php else: ?>
@@ -174,15 +239,36 @@ $nSites = count($S);
 </thead>
 <tbody>
 <?php $cells = function (?array $b, bool $tot = false) use ($N, $V) { $c = $tot ? ' tot' : ''; return '<td class="gs n' . $c . '">' . $N($b['apps_pkt'] ?? 0) . '</td><td class="n v' . $c . '">' . $V($b['apps_val'] ?? 0) . '</td><td class="n' . $c . '">' . $N($b['gm_pkt'] ?? 0) . '</td><td class="n v' . $c . '">' . $V($b['gm_val'] ?? 0) . '</td><td class="n' . $c . '"><b>' . $N($b['pkt'] ?? 0) . '</b></td><td class="n v' . $c . '">' . $V($b['val'] ?? 0) . '</td>'; };
-foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type')); $isDue = $r['due'] && !$r['off']; ?>
+// Per store: PKT that are already on a trip but still Pending in Oracle (last sync returned them). Board PKT + these = what an Oracle report shows for the store.
+$__it = [];
+foreach ($d->query("WITH lt AS (SELECT MAX(synced_at) mx FROM prd_pending WHERE source_system='ORACLE')
+    SELECT lower(BTRIM(p.destination_name)) k, p.source_site_code site, COUNT(DISTINCT " . prd_pkt_col('p') . ") pkt, STRING_AGG(DISTINCT t.trip_code || ' (' || t.status || ')', ', ') trips
+    FROM prd_pending p CROSS JOIN lt JOIN trips t ON t.id=p.planned_trip_id
+    WHERE p.source_system='ORACLE' AND COALESCE(t.status,'')<>'Cancelled' AND p.synced_at >= lt.mx AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=" . $d->quote(prd_status_filter()) . "
+    GROUP BY 1,2")->fetchAll(PDO::FETCH_ASSOC) as $__x) {
+  $__it[$__x['k']]['pkt'] = ($__it[$__x['k']]['pkt'] ?? 0) + (int)$__x['pkt'];
+  $__it[$__x['k']]['tip'][] = $__x['site'] . ': ' . $__x['pkt'] . ' PKT on ' . $__x['trips'];
+}
+// Per store: PKT reserved by a pending plan (not on the board until the plan is cancelled or turned into trips)
+$__ip = [];
+foreach ($d->query("WITH lt AS (SELECT MAX(synced_at) mx FROM prd_pending WHERE source_system='ORACLE')
+    SELECT lower(BTRIM(p.destination_name)) k, p.source_site_code site, COUNT(DISTINCT " . prd_pkt_col('p') . ") pkt, STRING_AGG(DISTINCT pl.plan_no, ', ') plans
+    FROM prd_pending p CROSS JOIN lt JOIN tms_plan_lines l ON l.id=p.plan_line_id AND l.status='Pending' JOIN tms_plans pl ON pl.id=l.plan_id
+    WHERE p.source_system='ORACLE' AND NOT " . prd_on_trip_sql('p') . " AND p.synced_at >= lt.mx AND UPPER(BTRIM(COALESCE(p.challan_status,'')))=" . $d->quote(prd_status_filter()) . "
+    GROUP BY 1,2")->fetchAll(PDO::FETCH_ASSOC) as $__x) {
+  $__ip[$__x['k']]['pkt'] = ($__ip[$__x['k']]['pkt'] ?? 0) + (int)$__x['pkt'];
+  $__ip[$__x['k']]['tip'][] = $__x['site'] . ': ' . $__x['pkt'] . ' PKT in ' . $__x['plans'];
+}
+foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type')); $isDue = $r['due'] && !$r['off'];
+  $__k = strtolower(trim((string)$r['name'])); $dsp = $__ot[$__k]['all'] ?? $__tz; ?>
 <tr class="<?= $r['off'] ? 'off' : '' ?><?= $isDue ? ' due' : '' ?>" data-id="<?= $id ?>" data-q="<?= e(strtolower($r['name'] . ' ' . ($r['store']['name'] ?? '') . ' ' . ($r['store']['city'] ?? ''))) ?>" data-state="<?= e($r['state']) ?>" data-cluster="<?= e($r['cluster']) ?>" data-types="<?= e($types) ?>" data-due="<?= $isDue ? 1 : 0 ?>"
-  data-name="<?= e(strtolower($r['name'])) ?>" data-pkt="<?= $r['pkt'] ?>" data-val="<?= round($r['val']) ?>" data-wait="<?= (int)$r['wait'] ?>" data-apall="<?= $r['apps_pkt'] ?>" data-gpall="<?= $r['gm_pkt'] ?>" data-tpall="<?= $r['pkt'] ?>"<?php foreach ($S as $sc => $_): ?> data-ap<?= e($sc) ?>="<?= (int)($r['by'][$sc]['apps_pkt'] ?? 0) ?>" data-gp<?= e($sc) ?>="<?= (int)($r['by'][$sc]['gm_pkt'] ?? 0) ?>" data-tp<?= e($sc) ?>="<?= (int)($r['by'][$sc]['pkt'] ?? 0) ?>"<?php endforeach; ?>>
+  data-name="<?= e(strtolower($r['name'])) ?>" data-pkt="<?= $dsp['pkt'] ?>" data-val="<?= round($dsp['val']) ?>" data-wait="<?= (int)$r['wait'] ?>" data-apall="<?= $dsp['apps_pkt'] ?>" data-gpall="<?= $dsp['gm_pkt'] ?>" data-tpall="<?= $dsp['pkt'] ?>"<?php foreach ($S as $sc => $_): ?> data-ap<?= e($sc) ?>="<?= (int)($__ot[$__k][$sc]['apps_pkt'] ?? 0) ?>" data-gp<?= e($sc) ?>="<?= (int)($__ot[$__k][$sc]['gm_pkt'] ?? 0) ?>" data-tp<?= e($sc) ?>="<?= (int)($__ot[$__k][$sc]['pkt'] ?? 0) ?>"<?php endforeach; ?>>
   <td class="ck"><input type="checkbox" class="px-ck" value="<?= $id ?>" aria-label="Select <?= e($r['name']) ?>" <?= $r['off'] ? 'disabled' : '' ?>></td>
-  <td class="st"><button type="button" class="nm" onclick="px.open('<?= $id ?>')" aria-expanded="false" title="<?= e($r['store'] ? ($r['store']['name'] . ($r['store']['city'] ? ', ' . $r['store']['city'] : '')) : 'Not in Store Master') ?>"><?= e($r['name']) ?></button><?= !$r['store'] ? '<span class="tag m" title="Not in Store Master">!</span>' : '' ?></td>
+  <td class="st"><button type="button" class="nm" onclick="px.open('<?= $id ?>')" aria-expanded="false" title="<?= e($r['store'] ? ($r['store']['name'] . ($r['store']['city'] ? ', ' . $r['store']['city'] : '')) : 'Not in Store Master') ?>"><?= e($r['name']) ?></button><?= !$r['store'] ? '<span class="tag m" title="Not in Store Master">!</span>' : '' ?><?php $__k = strtolower(trim((string)$r['name'])); if (!empty($__it[$__k])): ?> <span style="font-size:10px;font-weight:700;color:#475569;background:#e2e8f0;border-radius:999px;padding:1px 7px;white-space:nowrap" title="Included in the PKT shown for this store (as in Oracle): already on a trip, so they cannot be planned again. Left to plan: <?= (int)$r['pkt'] ?> PKT.&#10;<?= e(implode("\n", $__it[$__k]['tip'])) ?>"><?= (int)$__it[$__k]['pkt'] ?> in trips</span><?php endif; ?><?php if (!empty($__ip[$__k])): ?> <span style="font-size:10px;font-weight:700;color:#1d4ed8;background:#eff4ff;border-radius:999px;padding:1px 7px;white-space:nowrap" title="Included in the PKT shown for this store (as in Oracle): waiting on the Review trips page.&#10;<?= e(implode("\n", $__ip[$__k]['tip'])) ?>"><?= (int)$__ip[$__k]['pkt'] ?> in plan</span><?php endif; ?></td>
   <td><?= e($r['state'] ?: '–') ?></td><td><?= e($r['status'] ?: '–') ?></td><td><?= e($r['cluster'] ?: '–') ?></td>
   <td class="<?= $isDue ? 'late' : '' ?>"><?= $r['last_dispatch'] ? e(date('d-M-y', strtotime((string)$r['last_dispatch']))) : '–' ?><?= $r['wait'] !== null ? ' <small>' . (int)$r['wait'] . 'd</small>' : '' ?></td>
   <td class="sg"><?php foreach ($r['chips'] as $src => $c): ?><span class="chip c-<?= e($c['type']) ?>" title="<?= e($c['remark'] . ($c['sub'] ? ' · ' . $c['sub'] : '')) ?>"><?= $sug === 'separate' && $nSites > 1 ? '<span class="src">' . e($src) . '</span>' : '' ?><?= e($c['label']) ?><?= $c['veh'] ? ' <small>' . e($c['veh']) . '</small>' : '' ?></span><?php endforeach; ?></td>
-  <?php foreach ($S as $sc => $_) echo $cells($r['by'][$sc] ?? null); if ($nSites > 1) echo $cells($r, true); ?>
+  <?php foreach ($S as $sc => $_) echo $cells($__ot[$__k][$sc] ?? null); if ($nSites > 1) echo $cells($dsp, true); ?>
 
 </tr>
 <?php endforeach; ?>
@@ -194,14 +280,41 @@ foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type
 <?php endif; ?>
 </div>
 
+<?php // Full matrix is the reference table (APPS / GM split per warehouse). Picking stores, clusters and trip analysis live on the PRD Pending desk, so those widgets are not shown here. ?>
+<style>
+.cl-chips,.px-dw,td.ck,th.ck{display:none!important}
+.px-head{margin:0 0 6px;gap:8px}.px-stats{gap:6px}.px-stats>span{padding:3px 10px!important;font-size:12px!important}
+.px-tools{margin:0 0 6px!important;gap:6px!important}.px-tools .input,.px-tools .select,.px-tools .px-seg a{height:30px!important;font-size:12px!important}
+.px-t{font-size:12px}.px-t td{padding:3px 8px!important;line-height:1.25}
+/* two header rows that stay locked while the rows scroll: fixed heights so the second row sits exactly under the first */
+.px-t thead th{padding:0 8px!important;font-size:11px;position:sticky!important;z-index:5}
+.px-t thead tr:first-child th{top:0!important;height:28px!important;line-height:28px}
+.px-t thead tr:nth-child(2) th{top:28px!important;height:26px!important;line-height:26px}
+.px-t thead tr:first-child th[rowspan]{height:54px!important;vertical-align:middle}
+.px-t td.st,.px-t th.st{left:0!important;min-width:150px!important;max-width:190px}
+.px-t td.st{overflow:hidden;text-overflow:ellipsis}
+.px-t th:not(.st):not(.grp):not(.gs):not(.sgh),.px-t td{min-width:0}
+.px-t td.n,.px-t th.n{min-width:52px;width:1%}
+.px-t td.sg{min-width:150px;max-width:210px}
+.px-wrap{height:calc(100vh - 175px);max-height:none;min-height:240px;overflow:auto!important}
+</style>
+<?php if (!can('plan')): // view-only role: no store selection, plan review, or hold / release (the server refuses these too) ?>
+<style>.px-dw,.cl-chips,.px-dock,.pb-drawer,.pb-scrim,td.ck input[type=checkbox],th.ck input[type=checkbox],.px-det .btn[onclick^="px.hold"],.px-det .btn[onclick^="px.release"]{display:none!important}</style>
+<?php endif; ?>
+<div class="px-dw">
+<section class="an" id="anP" hidden aria-label="Selection analysis">
+  <div class="an-bar" onclick="px.anToggle()"><b>Analysis</b><span class="sum" id="anSum"></span><span class="wait" id="anWait"></span><span class="tg" id="anTg">Show ▲</span></div>
+  <div class="an-body" id="anBody" hidden></div>
+</section>
 <div class="px-dock" aria-live="polite">
   <div><div class="k">Selected</div><div class="v" id="dkStores">0</div></div>
   <div><div class="k">PKT</div><div class="v" id="dkPkt">0</div></div>
   <div><div class="k">Value</div><div class="v" id="dkVal">₹0</div></div>
-  <div class="hint" id="dkHint">Tick stores (or click a row), then review the plan. The plan makes trips of max <?= tms_trip_max_pkt() ?> PKT and <?= tms_trip_max_stores() ?> stores.</div>
+  <div class="hint" id="dkHint">Tick the stores to dispatch, then click Review trips.</div>
   <button class="btn light" type="button" onclick="px.pickDue()" <?= $M['due'] ? '' : 'disabled' ?>>Select waiting > <?= (int)$cfg['due_days'] ?>d</button>
   <button class="btn clear" type="button" id="dkClear" onclick="px.clear()" hidden>Clear</button>
-  <button class="btn primary" type="button" id="dkReview" onclick="px.review()" disabled>Review plan</button>
+  <button class="btn primary" type="button" id="dkReview" onclick="px.makePlan()" disabled>Review trips</button>
+</div>
 </div>
 
 <dialog class="pb-dialog" id="pbHold" aria-labelledby="pbHoldT"><form method="dialog" onsubmit="px.holdSave(event)" data-no-busy>
@@ -229,6 +342,7 @@ foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type
   const DET=<?= json_encode(array_map(fn($r) => ['name' => $r['name'], 'hold' => $r['hold'] ? ['reason' => $r['hold']['reason'], 'remarks' => $r['hold']['remarks'], 'until' => $r['hold']['hold_until'], 'since' => substr((string)$r['hold']['created_at'], 0, 10)] : null,
     'note' => $r['note'], 'note_key' => $r['note_key'], 'chips' => $r['chips'], 'flags' => array_map(fn($f) => [$f[0], $f[1]], $r['flags']), 'last' => $r['last_dispatch'], 'oldest' => $r['oldest'], 'km' => $r['dc_km'] ? round($r['dc_km']) : null,
     'store' => $r['store'] ? ($r['store']['code'] . ' · ' . $r['store']['name'] . ($r['store']['city'] ? ', ' . $r['store']['city'] : '')) : null, 'by' => $r['by']], $R), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const SITELBL=<?= json_encode($vo['site'] ? (string)$vo['site'] : ($nSites > 1 ? 'both sites' : '')) ?>;
   const TOKEN=<?= json_encode($token) ?>, MAXPKT=<?= tms_trip_max_pkt() ?>, MAXST=<?= tms_trip_max_stores() ?>, MINFILL=<?= (int)$cfg['min_fill_pct'] ?>, NCOL=<?= 7 + 6 * $nSites + ($nSites > 1 ? 6 : 0) ?>;
   const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -250,8 +364,9 @@ foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type
     const ids=picked(); rows().forEach(r=>r.classList.toggle('sel',ids.includes(r.dataset.id)));
     const pkt=ids.reduce((s,i)=>s+D[i].pkt,0),val=ids.reduce((s,i)=>s+D[i].val,0);
     $('#dkStores').textContent=ids.length; $('#dkPkt').textContent=pkt.toLocaleString('en-IN'); $('#dkVal').textContent=L(val);
-    $('#dkReview').disabled=!ids.length; $('#dkReview').textContent=ids.length?'Review plan for '+ids.length+' store'+(ids.length>1?'s':''):'Review plan'; $('#dkClear').hidden=!ids.length;
-    $('#dkHint').textContent=ids.length?(pkt>MAXPKT?'More than '+MAXPKT+' PKT, so the plan will make several trips. ':'')+'Next: review the plan.':'Tick stores (or click a row), then review the plan. The plan makes trips of max '+MAXPKT+' PKT and '+MAXST+' stores.';
+    $('#dkReview').disabled=!ids.length; $('#dkReview').textContent=ids.length?'Review trips for '+ids.length+' store'+(ids.length>1?'s':''):'Review trips'; $('#dkClear').hidden=!ids.length;
+    if(typeof anSchedule==='function'){chips();anSchedule(ids);}
+    $('#dkHint').textContent=ids.length?'The system proposes the trips for the ticked stores'+(SITELBL?' ('+SITELBL+')':'')+'; you confirm them on the next page.':'Tick the stores to dispatch, then click Review trips.'+(SITELBL?' Site: '+SITELBL+'.':'');
   }
   function clear(){$$('.px-ck').forEach(c=>c.checked=false);sel();}
   function all(x){$$('.px-ck').forEach(c=>{if(!c.closest('tr').hidden&&!c.disabled)c.checked=x.checked});sel();}
@@ -326,6 +441,15 @@ foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type
     $('#pbDrSum').innerHTML='<b>'+n+'</b> trip(s) · <b>'+st+'</b> stops · <b>'+pk.toLocaleString('en-IN')+'</b> PKT'+(miss?' · <span style="color:#b42318">'+miss+' trip(s) need the site linked to a DC (<a href="MASTER_OPS.php?tab=warehouses">Warehouses</a>)</span>':'');
     const g=$('#pbDrGo');g.disabled=!n||miss>0;g.textContent=n?'Create '+n+' trip'+(n>1?'s':''):'Create trips';
   }
+  // Tick stores -> ONE plan (all ticked stores; the sites are the ones this board is showing). Trips are made from the plan later.
+  async function makePlan(){
+    const ids=picked(); if(!ids.length)return;
+    const pkt=ids.reduce((s,i)=>s+D[i].pkt,0),val=ids.reduce((s,i)=>s+D[i].val,0);
+    if(!confirm('Create ONE plan for '+ids.length+' store'+(ids.length>1?'s':'')+' · '+pkt.toLocaleString('en-IN')+' PKT · '+L(val)+(SITELBL?' · '+SITELBL:'')+'?'))return;
+    const b=$('#dkReview');b.disabled=true;b.textContent='Creating plan…';
+    try{const j=await post({action:'create_plan',keys:ids.flatMap(i=>D[i].keys)});location.href=j.redirect;}
+    catch(e){alert('Plan was not created: '+e.message);sel();}
+  }
   async function create(){
     const loads=plan.loads.map((l,i)=>({l,i})).filter(x=>x.l.on).map(x=>({joint:!!x.l.joint,stops:x.l.stops.map(s=>({parts:(s.parts||[{gkey:s.gkey,pkts:s.pkts}]).map(p=>({gkey:p.gkey,pkts:p.pkts}))})),dc_id:x.l.dc?+x.l.dc.id:0,vehicle_type:$('#vh'+x.i).value}));
     const g=$('#pbDrGo');g.disabled=true;g.textContent='Creating…';
@@ -337,7 +461,61 @@ foreach ($R as $id => $r): $types = implode(' ', array_column($r['chips'], 'type
   $('#pxT')?.addEventListener('click',e=>{const tr=e.target.closest('tbody tr[data-id]');if(!tr||e.target.closest('input,button,a'))return;const c=tr.querySelector('.px-ck');if(c&&!c.disabled){c.checked=!c.checked;sel();}});
   function compact(on){const t=$('#pxT');if(!t)return;t.classList.toggle('compact',on);$$('#pxT th.grp[data-full]').forEach(h=>h.colSpan=on?+h.dataset.short:+h.dataset.full);try{localStorage.setItem('px_compact',on?'1':'0')}catch(e){}}
   try{if(localStorage.getItem('px_compact')==='1'||(localStorage.getItem('px_compact')===null&&<?= $nSites ?>>=2)){$('#pxCompact').checked=true;compact(true);}}catch(e){}
-  window.px={compact,filter,sel,clear,all,pickDue,open,saveNote,hold,holdSave,release,review,close,inc,upd,create};
+  /* ---- cluster chips + live clubbing analysis of the ticked stores ---- */
+  let anTok=0,anTimer=null,anTab='club',anOpen=true,anData=null,anManual=false;
+  function chips(){
+    const by={}; rows().forEach(r=>{const c=r.dataset.cluster; if(!c||c==='-')return; const ck=r.querySelector('.px-ck'); if(!ck||ck.disabled)return; const b=by[c]||(by[c]={n:0,on:0,pkt:0}); b.n++; b.pkt+=D[r.dataset.id].pkt; if(ck.checked)b.on++;});
+    const names=Object.keys(by).sort(); const box=$('#clChips'); if(!box)return;
+    box.innerHTML=names.length?'<span class="lbl">Clusters</span>'+names.map(c=>{const b=by[c];return '<button type="button" class="cl-chip '+(b.on===b.n?'on':(b.on?'part':''))+'" data-c="'+esc(c)+'" title="Tick / untick every store of this cluster that can be planned"><b>'+esc(c)+'</b> '+b.n+' stores <small>'+b.pkt.toLocaleString('en-IN')+' PKT'+(b.on&&b.on<b.n?' · '+b.on+' ticked':'')+'</small></button>';}).join(''):'';
+  }
+  function pickCluster(c){
+    const list=rows().filter(r=>r.dataset.cluster===c).map(r=>r.querySelector('.px-ck')).filter(k=>k&&!k.disabled); const allOn=list.length&&list.every(k=>k.checked);
+    list.forEach(k=>k.checked=!allOn); sel();
+  }
+  function anToggle(){anManual=true;anOpen=!anOpen;anShow();}
+  function anShow(){const b=$('#anBody'); if(!b)return; b.hidden=!anOpen||!anData; $('#anTg').textContent=anOpen?'Hide ▼':'Show ▲';}
+  function anSchedule(ids){
+    const p=$('#anP'); if(!p)return; clearTimeout(anTimer);
+    if(!ids.length){p.hidden=true;anData=null;return;}
+    p.hidden=false; $('#anWait').textContent='analysing…';
+    anTimer=setTimeout(()=>anRun(ids),450);
+  }
+  async function anRun(ids){
+    const tok=++anTok, keys=ids.flatMap(i=>D[i].keys), mode=(document.querySelector('input[name=pbmode]:checked')||{}).value||'separate';
+    try{const j=await post({action:'prd_preview',keys,mode}); if(tok!==anTok)return; anData=j; $('#anWait').textContent=''; anRender();}
+    catch(e){if(tok!==anTok)return; anData=null; $('#anWait').textContent=''; $('#anSum').innerHTML='<span style="color:#b42318">'+esc(e.message)+'</span>'; $('#anBody').hidden=true;}
+  }
+  const fillCls=f=>f>100?'over':(f<MINFILL?'low':'');
+  function anRender(){
+    const j=anData, loads=j.loads||[], excl=j.excluded||[];
+    const pk=loads.reduce((s,l)=>s+l.pkt,0), cap=loads.reduce((s,l)=>s+(l.capacity||0),0), km=loads.reduce((s,l)=>s+(l.route_km||0),0);
+    const clubbed=loads.filter(l=>l.stops.length>1), alone=loads.filter(l=>l.stops.length===1), stores=loads.reduce((s,l)=>s+l.stops.length,0);
+    const fill=cap?Math.round(pk*100/cap):0, veh={}; loads.forEach(l=>veh[l.vehicle]=(veh[l.vehicle]||0)+1);
+    $('#anSum').innerHTML='<b>'+loads.length+'</b> trip'+(loads.length===1?'':'s')+' · <b>'+clubbed.length+'</b> clubbed, <b>'+alone.length+'</b> alone <i>·</i> avg fill <b>'+fill+'%</b> <i>·</i> ~<b>'+km.toLocaleString('en-IN')+'</b> km'+(excl.length?' <i>·</i> <span style="color:#b54708">'+excl.length+' left out</span>':'');
+    const tabs=[['club','Trips & clubbing'],['cluster','By cluster'],['why','Not clubbed / left out ('+(alone.length+excl.length)+')']];
+    let h='<div class="an-tabs">'+tabs.map(t=>'<button type="button" class="'+(anTab===t[0]?'on':'')+'" onclick="px.anTab(\''+t[0]+'\')">'+t[1]+'</button>').join('')+'</div>';
+    h+='<div class="an-kpi"><div><b>'+loads.length+'</b><span>trips</span></div><div><b>'+stores+'</b><span>stores planned</span></div><div><b>'+pk.toLocaleString('en-IN')+'</b><span>PKT</span></div><div><b>'+fill+'%</b><span>avg vehicle fill</span></div><div><b>'+km.toLocaleString('en-IN')+'</b><span>km (DC → last store)</span></div><div><b>'+Object.entries(veh).map(([t,n])=>n+'× '+esc(t)).join(', ')+'</b><span>vehicles needed</span></div></div>';
+    if(anTab==='club'){
+      h+=loads.map((l,i)=>{
+        const path='<div class="an-path"><span class="an-st"><b>'+esc((l.dc&&l.dc.code)||l.source)+'</b> <em>DC</em></span>'+l.stops.map(s=>'<span class="an-hop">'+(s.km!=null?s.km+' km':'km n/a')+'</span><span class="an-st"><b>'+esc(s.code)+'</b> <small>'+s.pkt+' PKT</small>'+(s.cluster&&s.cluster!=='-'?'<em>'+esc(s.cluster)+'</em>':'')+(s.part?'<em>part '+esc(s.part)+'</em>':'')+'</span>').join('')+'</div>';
+        const hops=l.stops.slice(1).map(s=>s.km).filter(x=>x!=null), far=hops.length?Math.max(...hops):null, cl=[...new Set(l.stops.map(s=>s.cluster).filter(c=>c&&c!=='-'))];
+        const note=l.stops.length>1?'<div class="an-ok">Clubbed: '+l.stops.map(s=>esc(s.code)).join(' + ')+(far!=null?' — stores are at most '+far+' km apart':'')+(cl.length>1?' · mixes clusters '+cl.map(esc).join(' + '):(cl.length?' · same cluster '+esc(cl[0]):''))+'.</div>':'<div class="an-why">Alone: '+esc(l.alone||'')+'</div>';
+        return '<div class="an-trip '+(l.stops.length>1?'':'alone')+'"><div class="an-th"><span><b>Trip '+(i+1)+'</b> · '+esc(l.source)+' · '+esc(l.vehicle)+'</span><span><b>'+l.pkt+' PKT</b> · '+L(l.value)+' · <span class="f '+fillCls(l.fill)+'">'+l.fill+'% fill</span>'+(l.route_km!=null?' · ~'+l.route_km+' km':'')+'</span></div>'+path+note+(l.warnings||[]).map(w=>'<div class="an-why">⚠ '+esc(w)+'</div>').join('')+'</div>';
+      }).join('')||'<div class="note">Nothing can be planned from this selection.</div>';
+    }else if(anTab==='cluster'){
+      const cs={}; loads.forEach((l,i)=>l.stops.forEach(s=>{const c=(s.cluster&&s.cluster!=='-')?s.cluster:'(no cluster)'; const o=cs[c]||(cs[c]={stores:new Set(),pkt:0,trips:new Set(),alone:0,club:0,fillSum:0,fillN:0,with:{}}); o.stores.add(s.code); o.pkt+=s.pkt; if(!o.trips.has(i)){o.trips.add(i);o.fillSum+=l.fill;o.fillN++;} if(l.stops.length>1)o.club++; else o.alone++; l.stops.forEach(t=>{const tc=(t.cluster&&t.cluster!=='-')?t.cluster:'(no cluster)'; if(tc!==c)o.with[tc]=(o.with[tc]||0)+1;});}));
+      const names=Object.keys(cs).sort();
+      h+=names.length?'<table class="an-tbl"><tr><th>Cluster</th><th class="n">Stores</th><th class="n">PKT</th><th class="n">Trips</th><th class="n">Clubbed stops</th><th class="n">Alone</th><th class="n">Avg fill</th><th>Also clubs with</th></tr>'+names.map(c=>{const o=cs[c];return '<tr><td><b>'+esc(c)+'</b></td><td class="n">'+o.stores.size+'</td><td class="n">'+o.pkt.toLocaleString('en-IN')+'</td><td class="n">'+o.trips.size+'</td><td class="n">'+o.club+'</td><td class="n">'+o.alone+'</td><td class="n">'+Math.round(o.fillSum/o.fillN)+'%</td><td>'+(Object.keys(o.with).length?Object.entries(o.with).map(([k,n])=>esc(k)+' ('+n+')').join(', '):'<span class="note">own cluster only</span>')+'</td></tr>';}).join('')+'</table>':'<div class="note">No planned trips.</div>';
+    }else{
+      if(excl.length)h+='<div class="an-excl"><b>'+excl.length+' store(s) cannot be planned</b><ul>'+excl.map(x=>'<li>'+esc(x.name)+': '+esc(x.reason)+'</li>').join('')+'</ul></div>';
+      h+=alone.length?'<table class="an-tbl"><tr><th>Store</th><th class="n">PKT</th><th class="n">Fill</th><th>Why it travels alone</th></tr>'+alone.map(l=>{const s=l.stops[0];return '<tr><td><b>'+esc(s.code)+'</b> <span class="note">'+esc(s.name||'')+(s.cluster&&s.cluster!=='-'?' · '+esc(s.cluster):'')+'</span></td><td class="n">'+l.pkt+'</td><td class="n">'+l.fill+'%</td><td>'+esc(l.alone||'')+'</td></tr>';}).join('')+'</table>':'<div class="note">Every planned store is clubbed with another one.</div>';
+    }
+    $('#anBody').innerHTML=h; anShow();
+  }
+  function anTabSet(t){anTab=t; if(anData)anRender();}
+  window.px={compact,filter,sel,clear,all,pickDue,open,saveNote,hold,holdSave,release,review,close,inc,upd,create,makePlan,anToggle,anTab:anTabSet,pickCluster};
+  $('#clChips')?.addEventListener('click',e=>{const b=e.target.closest('.cl-chip');if(b)pickCluster(b.dataset.c);});
+  chips();
   window.prd=window.px;
   filter();sel();
 })();

@@ -1,0 +1,63 @@
+/* Plans (Indents tab): plan list, trip preview, old indents */
+.pl{--ink:#101828;--sub:#667085;--line:#e4e7ec;--soft:#f8fafc;--blue:#1d4ed8;--blue-soft:#eff4ff;--green:#067647;--green-soft:#ecfdf3;--amber:#b54708;--amber-soft:#fffaeb;--red:#b42318;--red-soft:#fef3f2;color:var(--ink)}
+.pl-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 12px}
+.pl-top h2{margin:0;font-size:18px;font-weight:700}
+.pl-top .sub{color:var(--sub);font-size:12.5px;margin-top:2px}
+.pl-filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.pl-chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 12px;font-size:12.5px;color:#344054;text-decoration:none;cursor:pointer}
+.pl-chip.on{background:var(--blue);border-color:var(--blue);color:#fff}
+.pl-search{height:34px;border:1px solid var(--line);border-radius:8px;padding:0 10px;font-size:13px;min-width:220px}
+.pl-bar{position:sticky;top:0;z-index:5;display:none;align-items:center;gap:12px;background:var(--blue-soft);border:1px solid #c7d7fe;border-radius:10px;padding:10px 14px;margin:0 0 10px;font-size:13px}
+.pl-bar.show{display:flex}.pl-bar b{font-variant-numeric:tabular-nums}.pl-bar .grow{flex:1}
+.pl-wrap{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:auto}
+.pl-t{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+.pl-t th{position:sticky;top:0;background:var(--soft);text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--sub);font-weight:700;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+.pl-t td{padding:9px 12px;border-bottom:1px solid #f0f2f5;vertical-align:middle}
+.pl-t td.n,.pl-t th.n{text-align:right;font-variant-numeric:tabular-nums}
+.pl-t tr.pa td{background:#fff}.pl-t tr.pb td{background:#fafbfc}
+.pl-t tr.first td{border-top:2px solid #d0d5dd}
+.pl-t tr.sel td{background:var(--blue-soft)}
+.pl-t tr.flash td{animation:plflash 2.4s ease-out}
+@keyframes plflash{from{background:#fef9c3}to{background:transparent}}
+.pl-t .pno{font-weight:700;color:var(--blue);text-decoration:none;white-space:nowrap}
+.pl-t .rep{color:#98a2b3}
+.pl-t .sub{display:block;color:var(--sub);font-size:11.5px}
+.pl-st{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.pl-st.Pending{background:var(--amber-soft);color:var(--amber)}.pl-st.Partly{background:var(--blue-soft);color:var(--blue)}
+.pl-st.Trip-Created,.pl-st.Trips-Created,.pl-st.Closed{background:var(--green-soft);color:var(--green)}.pl-st.Cancelled{background:#f2f4f7;color:#667085}
+.pl-act{display:flex;gap:6px;align-items:center;justify-content:flex-end}
+.pl-btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 10px;font-size:12px;cursor:pointer;color:#344054;text-decoration:none;white-space:nowrap}
+.pl-btn.pri{background:var(--blue);border-color:var(--blue);color:#fff}.pl-btn.bad{color:var(--red)}
+.pl-empty{padding:34px;text-align:center;color:var(--sub)}
+/* trip preview */
+.pv{background:#fff;border:1px solid #c7d7fe;border-radius:12px;padding:16px;margin:0 0 16px;box-shadow:0 6px 24px rgba(29,78,216,.08)}
+.pv-h{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.pv-h h3{margin:0;font-size:16px}.pv-h .sub{color:var(--sub);font-size:12.5px;margin-top:3px}
+.pv-sum{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.pv-sum span{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12.5px}.pv-sum b{font-variant-numeric:tabular-nums}
+.pv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.pv-trip{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff}
+.pv-trip-h{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.pv-trip-h b{font-size:14px}.pv-trip-h .src{color:var(--sub);font-size:12px}
+.pv-route{list-style:none;margin:0;padding:0}
+.pv-route li{display:flex;gap:10px;align-items:flex-start;padding:7px 0;position:relative}
+.pv-route li+li::before{content:"";position:absolute;left:11px;top:-9px;height:16px;border-left:2px dashed #cbd5e1}
+.pv-no{flex:none;width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center}
+.pv-route .nm{flex:1;min-width:0}.pv-route .nm b{display:block}.pv-route .nm small{color:var(--sub)}
+.pv-route .r{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;font-size:12.5px}.pv-route .r small{display:block;color:var(--sub)}
+.pv-fill{height:6px;border-radius:99px;background:#eaecf0;margin:8px 0 4px;overflow:hidden}.pv-fill i{display:block;height:100%;background:var(--green)}
+.pv-fill.low i{background:#f79009}.pv-fill.over i{background:var(--red)}
+.pv-meta{display:flex;justify-content:space-between;font-size:12px;color:var(--sub);gap:8px;flex-wrap:wrap}
+.pv-warn{background:var(--amber-soft);color:#93370d;border-radius:8px;padding:6px 9px;font-size:12px;margin-top:8px}
+.pv-veh{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:12px;color:var(--sub)}.pv-veh select{height:30px;border:1px solid var(--line);border-radius:8px;padding:0 6px}
+.pv-foot{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+.pv-excl{background:var(--red-soft);color:#7a271a;border:1px solid #fecdca;border-radius:10px;padding:10px 12px;margin:0 0 12px;font-size:12.5px}
+.pv-excl ul{margin:6px 0 0 18px;padding:0}
+.old{margin-top:18px}.old>summary{cursor:pointer;font-weight:700;padding:12px 16px;border:1px solid var(--line);border-radius:12px;background:#fff;list-style:none}
+.old>summary::-webkit-details-marker{display:none}.old>summary::before{content:"▸ ";color:var(--sub)}.old[open]>summary::before{content:"▾ "}
+.old[open]>summary{border-bottom-left-radius:0;border-bottom-right-radius:0}
+.old-body{border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;padding:12px;background:#fff}
+
+/* Indents table on the data-table component: compact, readable */
+.pl .dt-table{font-size:12.5px}.pl .dt-table td{vertical-align:top}.pl .dt-table .pno{font-weight:600;white-space:nowrap}
+.pl .dt-table td:nth-child(8),.pl .dt-table td:nth-child(9){white-space:nowrap}.pl .dt-table .rep{color:#98a2b3}

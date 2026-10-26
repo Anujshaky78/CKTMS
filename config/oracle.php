@@ -8,10 +8,11 @@
 $local = is_file(__DIR__ . '/oracle.local.php') ? (require __DIR__ . '/oracle.local.php') : [];
 if (!is_array($local)) $local = [];
 return array_replace([
-  'user' => getenv('TMS_ORACLE_USER') ?: 'MISRETAIL',
-  'password' => getenv('TMS_ORACLE_PASSWORD') ?: 'CKSPL',
+  // No credentials in this file: set TMS_ORACLE_* environment variables or config/oracle.local.php.
+  'user' => (string)(getenv('TMS_ORACLE_USER') ?: ''),
+  'password' => (string)(getenv('TMS_ORACLE_PASSWORD') ?: ''),
   // OCI8 connect string examples: //dbhost:1521/SERVICE_NAME or TNS alias from tnsnames.ora
-  'connect' => getenv('TMS_ORACLE_CONNECT') ?: '//10.0.0.15/GINESYS',
+  'connect' => (string)(getenv('TMS_ORACLE_CONNECT') ?: ''),
   'charset' => 'AL32UTF8',
 
   // ---------------- PRD PENDING (MISRETAIL.CUBE$SALDC) ----------------
@@ -40,7 +41,9 @@ return array_replace([
 
   // ---------------- STORE MASTER (MISRETAIL.T_STORE_OPENING_DATE) ----------------
   'store_table' => 'MISRETAIL.T_STORE_OPENING_DATE',
-  // Optional extra filter (Oracle SQL, bina WHERE ke), jaise: "STORE_STATUS <> 'CLOSED'"
+  // Store master sync sirf in STORE_STATUS wale stores laata hai (source DC 123/420 status se bina bhi aate hain)
+  'store_statuses' => ['ACTIVE', 'UPCOMING_STORE'],
+  // (not used any more: the store query is fixed in app/services/oracle_sync.php)
   'store_where' => '',
   // TMS store_code kis column se bane: 'INITIAL_NAME' (PRD me yahi destination naam aata hai) ya 'SITE_CODE'
   'store_code_from' => 'INITIAL_NAME',

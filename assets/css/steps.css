@@ -1,0 +1,11 @@
+/* Process bar on the Planning tabs */
+.ps{display:flex;gap:0;align-items:stretch;margin:0 0 14px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px;overflow-x:auto}
+.ps-s{flex:1 1 0;min-width:122px;display:flex;align-items:center;gap:9px;padding:10px 12px;text-decoration:none;color:#475467;border-right:1px solid #f0f2f5;position:relative}
+.ps-s:last-of-type{border-right:0}.ps-s:hover{background:#f8fafc}
+.ps-n{flex:0 0 24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:#eaecf0;color:#475467}
+.ps-t{display:flex;flex-direction:column;min-width:0;line-height:1.25}.ps-t b{font-size:13px;color:#101828;white-space:nowrap}.ps-t small{font-size:11px;color:#667085;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ps-c{margin-left:auto;font-size:12px;font-weight:700;color:#667085;background:#f2f4f7;border-radius:99px;padding:1px 8px}.ps-c.has{background:#fef0c7;color:#b54708}
+.ps-s.past .ps-n{background:#12b76a;color:#fff}.ps-s.past .ps-n::before{content:"✓";font-size:12px}.ps-s.past .ps-n{font-size:0}
+.ps-s.now{background:#eff4ff}.ps-s.now .ps-n{background:#1d4ed8;color:#fff}.ps-s.now .ps-t b{color:#1d4ed8}.ps-s.now::after{content:"";position:absolute;left:0;right:0;bottom:0;height:3px;background:#1d4ed8}
+.ps-prob{align-self:center;margin:0 10px;font-size:12px;font-weight:600;color:#b42318;background:#fef3f2;border:1px solid #fecdca;border-radius:99px;padding:3px 10px;text-decoration:none;white-space:nowrap}
+@media(max-width:900px){.ps-t small{display:none}.ps-s{min-width:96px}}

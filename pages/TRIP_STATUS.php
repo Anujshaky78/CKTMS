@@ -22,16 +22,16 @@ function distance_km($a,$b):float{ $lat1=(float)($a['latitude']??0);$lon1=(float
 }
 
 if($_SERVER['REQUEST_METHOD']==='POST'){
+ verify_csrf(); require_perm('track');
  try{
   $action=$_POST['action']??'';
   if($action==='trip_status'){
    $tripId=(int)$_POST['trip_id']; $status=trim($_POST['status']??''); $remarks=trim($_POST['remarks']??'');
    if(!in_array($status,['In Transit','Breakdown','Accident','Delivered'],true)) throw new Exception('Invalid trip status.');
-   $q=$d->prepare('SELECT * FROM trips WHERE id=?');$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
-   /* In Transit is ONLY allowed after Gate Pass has been created. */
-   if($status==='In Transit' && !in_array($tr['status'],['Gate Pass Created','In Transit','Breakdown','Accident'],true)) throw new Exception('Gate Pass create hone ke baad hi In Transit karein.');
-   if($status==='Delivered' && !in_array($tr['status'],['In Transit','Breakdown','Accident'],true)) throw new Exception('Trip Delivered karne se pehle In Transit hona chahiye.');
    $d->beginTransaction();
+   $q=$d->prepare('SELECT * FROM trips WHERE id=? FOR UPDATE');$q->execute([$tripId]);$tr=$q->fetch(PDO::FETCH_ASSOC);if(!$tr)throw new Exception('Trip not found.');
+   /* In Transit only after the Gate Pass; Breakdown / Accident / Delivered only while on the road (see tms_trip_transitions). */
+   tms_trip_require_move((string)$tr['status'],$status,(string)$tr['trip_code']);
    if($status==='In Transit'){
     $d->prepare("UPDATE trips SET status='In Transit',dispatched_at=COALESCE(dispatched_at,CURRENT_TIMESTAMP) WHERE id=?")->execute([$tripId]);
     set_trip_expected($d,$tripId);
@@ -54,8 +54,9 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
    $stopId=(int)$_POST['stop_id'];$status=trim($_POST['stop_status']??'');$remarks=trim($_POST['remarks']??'');
    if(!in_array($status,['In Transit','Delayed','Delivered'],true))throw new Exception('Invalid store status.');
    $q=$d->prepare("SELECT ts.*,t.trip_code,t.status trip_status,t.vehicle_id,t.driver_id,t.dispatched_at,s.store_code,s.store_name,s.transit_days FROM tms_trip_stops ts JOIN trips t ON t.id=ts.trip_id JOIN stores s ON s.id=ts.store_id WHERE ts.id=?");$q->execute([$stopId]);$st=$q->fetch(PDO::FETCH_ASSOC);if(!$st)throw new Exception('Store stop not found.');
-   if($st['trip_status']!=='In Transit' && $st['trip_status']!=='Breakdown' && $status!=='In Transit')throw new Exception('Store delivery update ke liye trip pehle In Transit hona chahiye.');
    $d->beginTransaction();
+   $lk=$d->prepare('SELECT status FROM trips WHERE id=? FOR UPDATE');$lk->execute([(int)$st['trip_id']]);$st['trip_status']=(string)$lk->fetchColumn();
+   if(!in_array($st['trip_status'],['In Transit','Breakdown'],true))throw new Exception('Store update ke liye trip In Transit (ya Breakdown) hona chahiye; abhi '.$st['trip_status'].' hai.');
    if(!$st['expected_delivery_at'] && !empty($st['dispatched_at'])){
     $expected=date('Y-m-d H:i:s',strtotime($st['dispatched_at'].' + '.((float)($st['transit_days']?:1)).' days'));
    }else $expected=$st['expected_delivery_at'];
@@ -96,6 +97,10 @@ foreach($trips as &$t){
 unset($t);
 if(!$embedded) head('Trip Status');
 ?>
+<?php if(!can('track')): // view-only role: the status forms are hidden (the server refuses them too) ?><style>main form[method="post"]{display:none!important}</style><?php endif; ?>
+<?php if(!$embedded): // opened directly: add the CSRF token to POST forms (embedded in Planning, _scripts.php does it) ?>
+<script>document.addEventListener('submit',function(e){var f=e.target;if(String(f.method).toLowerCase()==='post'&&!f.querySelector('input[name="csrf"]')){var i=document.createElement('input');i.type='hidden';i.name='csrf';i.value=<?= json_encode(csrf()) ?>;f.appendChild(i);}},true);</script>
+<?php endif; ?>
 <div class="page-title"><div><h2>Trip Status</h2><div class="note">Trip No., route, fleet and delivery status — update status here as trips move.</div></div><a class="btn light" href="PLANNING.php?tab=trips">Open Planning</a></div>
 <?php $__pills = function (array $rows, string $key, array $first, string $total) { $c = tms_count_by($rows, $key); $o = [[$total, count($rows), 'dark']];
   $tone = ['Delivered' => 'good', 'Cancelled' => 'bad', 'Breakdown' => 'bad', 'Accident' => 'bad', 'In Transit' => 'warn'];

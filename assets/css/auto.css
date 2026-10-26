@@ -1,0 +1,114 @@
+/* Auto trips tab: form + result tables */
+.au{--ink:#101828;--sub:#667085;--line:#e4e7ec;--blue:#1d4ed8;--green:#067647;--red:#b42318;color:var(--ink)}
+.au-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin:0 0 14px}.au-head h2{margin:0;font-size:20px}.au-head p{margin:4px 0 0;color:var(--sub);font-size:13px;max-width:820px;line-height:1.5}
+.au-btn{height:36px;border:1px solid var(--line);background:#fff;border-radius:8px;padding:0 14px;font-size:13px;cursor:pointer;color:#344054;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;white-space:nowrap}
+.au-btn.pri{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}.au-btn.big{height:42px;font-size:14px;padding:0 22px}.au-btn[disabled]{opacity:.5;cursor:not-allowed}
+/* form */
+.au-form{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}
+.au-form fieldset{border:1px solid var(--line);border-radius:10px;margin:0;padding:12px 14px 14px;min-width:0}
+.au-form legend{font-size:13px;font-weight:700;padding:0 6px}.au-form legend small{font-weight:400;font-size:12px;margin-left:8px}
+.au-form .scope{grid-column:span 4}.au-form .clus{grid-column:span 8}.au-form .rules{grid-column:span 6}.au-form .low{grid-column:span 6}.au-form .acts{grid-column:1/-1}
+.au .fld{display:flex;flex-direction:column;gap:4px;margin:0 0 10px;font-size:12px;color:#344054;font-weight:600}
+.au .fld select,.au .fld input{height:36px;border:1px solid var(--line);border-radius:8px;padding:0 10px;font-size:13px;background:#fff;font-weight:400;color:var(--ink)}
+.au .chk{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:0 0 10px;cursor:pointer}.au .chk small{display:block;color:var(--sub);font-size:11.5px;font-weight:400}.au .chk b,.au .chk span{font-weight:600}
+.au .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.au .hint{font-size:12px;color:var(--sub);margin:4px 0 0}.au .note{font-size:12px;color:var(--sub)}
+.au .cls{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;max-height:260px;overflow:auto;padding:2px}
+.au .cl{display:grid;grid-template-columns:18px 1fr;column-gap:8px;border:1px solid var(--line);border-radius:10px;padding:7px 10px;cursor:pointer;align-items:center}.au .cl:has(input:checked){border-color:var(--blue);background:#f5f8ff}
+.au .cl .nm{font-weight:700;font-size:13.5px}.au .cl .s{grid-column:2;font-size:11.5px;color:var(--sub)}.au .cl .s em{font-style:normal;color:var(--red);font-weight:600}.au .cl .sk{grid-column:2;font-size:11px;color:#b54708;font-weight:600}.au .cl .sk:empty{display:none}
+.au .acts{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:2px}.au .acts .hint{margin:0 0 0 6px}
+/* result */
+.au-res{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.au .tabs{display:flex;gap:6px;margin:0 0 12px;flex-wrap:wrap;align-items:center}.au .tabs button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;color:#475467}.au .tabs button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.au .tabs .hl{margin-left:auto;font-size:12.5px;color:var(--sub)}.au .tabs .hl b{color:var(--ink)}
+.au .tw{overflow:auto;border:1px solid var(--line);border-radius:10px}
+.au .tbl{border-collapse:collapse;width:100%;font-size:12.5px}.au .tbl th{position:sticky;top:0;background:#f9fafb;text-align:left;font-size:11.5px;color:#475467;font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;z-index:1}
+.au .tbl td{padding:7px 10px;border-bottom:1px solid #f0f2f5;vertical-align:top}.au .tbl .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.au .sub{display:block;color:var(--sub);font-size:11.5px}
+.au .tbl tfoot td{font-weight:700;background:#f9fafb}
+.au .seq tbody.trip{border-top:2px solid #98a2b3}.au .seq tbody.trip.skip{opacity:.4}.au .seq td.ck{width:30px}.au .seq .tn{white-space:nowrap}
+.au .seq tr.start td{background:#f9fafb}.au .seq .dcrow{color:#344054}.au .seq .dcrow .sub{display:inline;margin-left:6px}
+.au .sq{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--blue);color:#fff;font-size:11.5px;font-weight:700}
+.au .seq .fl{min-width:120px}.au .seq .fl .m{height:7px;background:#eaecf0;border-radius:4px;overflow:hidden;margin-bottom:3px}.au .seq .fl .m i{display:block;height:100%;background:#17b26a}.au .seq .fl .m i.low{background:#f79009}.au .seq .fl .m i.over{background:#f04438}.au .seq .fl span{font-size:11px;color:var(--sub)}
+.au .seq select{height:30px;border:1px solid var(--line);border-radius:6px;font-size:12px}
+.au .seq .rm{min-width:200px;max-width:280px;font-size:11.5px}.au .seq .rm span{display:block;margin-bottom:3px}.au .rm .ok{color:var(--green)}.au .rm .alone{color:#93590c}.au .rm .warn{background:#fffaeb;border-radius:6px;padding:3px 7px;color:#93590c}
+.au .late{color:var(--red);font-size:11px;font-weight:700;margin-left:4px}.au .red{color:var(--red)}
+.au .excl{background:#fffaeb;border:1px solid #fedf89;border-radius:10px;padding:8px 12px;font-size:12.5px;margin:0 0 12px}.au .excl ul{margin:4px 0 0;padding-left:18px}
+.au .foot{position:sticky;bottom:0;display:flex;gap:16px;align-items:center;justify-content:space-between;background:#fff;border-top:1px solid var(--line);margin:14px -16px -14px;padding:12px 16px;border-radius:0 0 12px 12px;flex-wrap:wrap}.au .foot .sum{font-size:12.5px;color:#475467;line-height:1.5}.au .foot .sum b{color:var(--ink)}.au .foot .btns{display:flex;gap:8px}
+@media(max-width:1200px){.au-form .scope,.au-form .clus,.au-form .rules,.au-form .low{grid-column:1/-1}}
+
+/* modal form, same look as Create Trip / Create Indent */
+.au-bar{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin:0 0 14px}.au-bar h2{margin:0;font-size:20px}.au-bar p{margin:4px 0 0;color:var(--sub);font-size:13px;max-width:820px;line-height:1.5}.au-bar .bt{display:flex;gap:8px}
+.au-empty{background:#fff;border:1px dashed #d0d5dd;border-radius:12px;padding:46px 20px;text-align:center;color:var(--sub);font-size:13.5px;line-height:1.7}.au-empty[hidden]{display:none}
+.au-dlg{border:0;border-radius:12px;padding:0;width:min(780px,calc(100vw - 32px));max-height:calc(100vh - 32px);box-shadow:0 24px 70px rgba(15,23,42,.35);color:var(--ink)}
+.au-dlg::backdrop{background:rgba(15,23,42,.5)}
+.au-dlg .au-form{display:flex;flex-direction:column;max-height:calc(100vh - 32px);background:#fff;border:0;border-radius:12px;padding:0;margin:0;gap:0}
+.au-dlg .dh{display:flex;justify-content:space-between;align-items:center;padding:18px 24px 6px}.au-dlg .dh h3{margin:0;font-size:18px}.au-dlg .dh .x{border:0;background:none;font-size:24px;line-height:1;cursor:pointer;color:#667085}
+.au-dlg .db{padding:8px 24px 6px;overflow:auto;display:grid;grid-template-columns:1fr 1fr;gap:16px 22px}.au-dlg .db .w{grid-column:1/-1}
+.au-dlg .fld{margin:0;gap:6px;font-size:14px;color:#101828;font-weight:500}.au-dlg .fld i{color:#d92d20;font-style:normal}.au-dlg .fld small{font-weight:400;color:var(--sub);font-size:12px;margin-left:6px}
+.au-dlg .fld select,.au-dlg .fld input{height:42px;border:1px solid #d0d5dd;border-radius:8px;padding:0 12px;font-size:14px;background:#fff;color:#101828;width:100%;box-sizing:border-box}.au-dlg .fld input:disabled{background:#f9fafb;color:#667085}
+.au-dlg .cls{max-height:210px;grid-template-columns:repeat(auto-fill,minmax(168px,1fr))}
+.au-dlg .seg2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.au-dlg .seg2 label{display:flex;gap:8px;align-items:center;border:1px solid #d0d5dd;border-radius:8px;height:44px;padding:0 14px;cursor:pointer;font-size:14px}.au-dlg .seg2 label:has(input:checked){border-color:var(--blue);background:#eff4ff}.au-dlg .seg2 small{color:var(--sub);font-size:11.5px;margin:0}
+.au-dlg .lowbox{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#fafbfc}.au-dlg .lowbox .two{margin-top:8px}
+.au-dlg .note{font-size:12px;color:var(--sub)}.au-dlg .df{display:flex;gap:10px;padding:16px 24px 20px}
+@media(max-width:640px){.au-dlg .db{grid-template-columns:1fr}.au-dlg .seg2{grid-template-columns:1fr}}
+.au-dlg .fld input[type=checkbox],.au-dlg .fld input[type=radio],.au-dlg .cl input,.au-dlg .chk input,.au-dlg .seg2 input{width:16px;height:16px;padding:0;flex:none;accent-color:var(--blue)}
+.au-dlg .lowbox .chk{margin:0}.au-dlg .lowbox .chk span{font-size:14px}.au-dlg .lowbox .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+/* searchable multi-select dropdown (Cluster / Store) */
+.au .ms{position:relative}
+.au .ms-b{width:100%;height:42px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 12px;font-size:14px;color:#101828;cursor:pointer;text-align:left}
+.au .ms-b .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.au .ms-b .v.ph{color:#98a2b3}.au .ms-b i{font-style:normal;color:#667085;font-size:12px}
+.au .ms-b:focus-visible{outline:2px solid #93b4ff}
+.au .ms-p{position:absolute;z-index:30;left:0;right:0;top:46px;background:#fff;border:1px solid #d0d5dd;border-radius:10px;box-shadow:0 12px 32px rgba(16,24,40,.18);padding:8px}
+.au .ms-p[hidden]{display:none}
+.au-dlg .fld .ms-s{height:36px;margin:0 0 6px}
+.au .ms-a{display:flex;justify-content:space-between;font-size:12px;padding:0 4px 6px}.au .ms-a a{color:var(--blue);text-decoration:none;font-weight:600}
+.au .ms-l{max-height:240px;overflow:auto}
+.au .ms-i{display:grid;grid-template-columns:20px 1fr auto;gap:8px;align-items:center;padding:7px 6px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:400}.au .ms-i:hover{background:#f5f8ff}
+.au .ms-i .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}.au .ms-i .t em{font-style:normal;font-weight:400;color:var(--sub);margin-left:4px}.au .ms-i .u{font-size:11px;color:var(--sub);white-space:nowrap}
+.au .ms-n{padding:10px;color:var(--sub);font-size:12.5px}
+.au-dlg .db{overflow:visible}.au-dlg .au-form{overflow:auto}
+
+/* trip sequence table: compact rows, resizable columns */
+.au .seq{table-layout:fixed;font-size:12.5px}
+.au .seq th{position:sticky;padding:7px 8px;overflow:visible}.au .seq th .rz{position:absolute;right:0;top:0;bottom:0;width:9px;cursor:col-resize;z-index:2}
+.au .seq th .rz::after{content:"";position:absolute;right:4px;top:22%;bottom:22%;border-right:1px solid #d0d5dd}.au .seq th .rz:hover::after,.au .seq th .rz.on::after{border-right:2px solid var(--blue)}
+body.au-rz{cursor:col-resize;user-select:none}
+.au .seq td{padding:3px 8px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.au .seq tr.start td{padding:2px 8px;font-size:11.5px;color:#475467}.au .seq tr.start td.n:first-of-type{font-size:11.5px}
+.au .seq .sub{display:inline;margin-left:5px;font-size:11px}.au .seq .tp .sub{display:block;margin:0}.au .seq tr.start td.tp{font-size:12.5px;color:var(--ink)}
+.au .seq .sc{display:flex;align-items:baseline;gap:6px;min-width:0}.au .seq .sc b{flex:none}.au .seq .sc .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--sub);font-size:11.5px}
+.au .seq .sc .bd{flex:none;font-size:10.5px;background:#f2f4f7;border-radius:5px;padding:0 5px;color:#475467}.au .seq .sc .late{flex:none;margin:0;font-size:10.5px;background:#fef3f2;border-radius:5px;padding:0 5px}
+.au .seq .sq{width:20px;height:20px;font-size:11px}
+.au .seq .fl{padding-top:2px}.au .seq .fl .m{margin-bottom:2px}
+.au .seq select{width:100%;height:26px;font-size:12px}
+.au .seq .rm{white-space:normal;max-width:none;min-width:0}.au .seq .rm span{display:block;margin:0 0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+.au .seq .rm .warn{padding:1px 6px}
+.au .tb{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--sub);margin:0 0 6px}.au .tb a{color:var(--blue);text-decoration:none;font-weight:600}
+
+/* leg rows: Source -> Destination */
+.au .seq tbody.trip tr.first td{border-top:0}
+.au .seq .cd{display:inline-block;font-weight:700;font-size:12.5px;background:#f2f4f7;border-radius:6px;padding:1px 8px}.au .seq .cd.dc{background:#eef2ff;color:#3730a3}
+.au .seq td.dst .sc b{font-size:13px}
+
+/* one row per trip */
+.au .seq tr.trip td{border-top:1px solid #eef1f5}.au .seq tr.trip.skip{opacity:.4}
+.au .seq td.dst .cd{cursor:default}.au .seq td.dst .cd.late{background:#fef3f2;color:#b42318}
+.au .seq td.rm{white-space:normal}
+.au .seq .rm span:nth-child(n+3){display:none}
+.au .seq td.dst{white-space:nowrap}.au .seq td.dst .dv{margin-left:8px;font-size:11.5px;color:var(--sub)}
+.au .ftl{font-size:11.5px;font-weight:700;border-radius:6px;padding:2px 8px;white-space:nowrap}.au .ftl.y{background:#ecfdf3;color:#067647}.au .ftl.n{background:#f2f4f7;color:#667085}
+.au .seq td.src{white-space:nowrap}.au .seq td.src .cd+.cd{margin-left:3px}
+
+/* compact page: tight heading, frozen table header, one-line rows */
+.au-bar{margin:0 0 8px;align-items:center}.au-bar h2{font-size:18px}.au-bar .au-btn.big{height:34px;font-size:13px;padding:0 16px}
+.au-res{padding:8px 10px}.au .tabs{margin:0 0 8px;gap:6px}.au .tabs button{padding:5px 12px;font-size:12.5px}.au .tabs .hl{font-size:12px}
+.au .tabs .au-btn{height:30px;padding:0 12px;font-size:12.5px}.au .tabs .lk{font-size:12px;color:var(--blue);text-decoration:none;font-weight:600;white-space:nowrap}
+.au .tw.scr{max-height:calc(100vh - 235px);overflow:auto}
+.au .tw.scr .seq th{position:sticky;top:0;z-index:5;background:#f9fafb;box-shadow:0 1px 0 var(--line)}
+.au .seq th{padding:6px 8px}.au .seq td{padding:2px 8px;line-height:1.25;font-size:12px}
+.au .seq td.fl{white-space:nowrap}.au .seq .fl .m{display:inline-block;width:62px;height:6px;margin:0 6px 0 0;vertical-align:middle}.au .seq .fl .pc{font-size:11.5px;color:var(--sub);vertical-align:middle}
+.au .seq select{height:24px;font-size:11.5px;padding:0 2px}
+.au .seq td.rm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.au .seq td.rm span{display:inline;margin:0}.au .seq td.rm .wi{margin-left:6px;background:#fffaeb;color:#93590c;border-radius:5px;padding:0 5px;font-size:11px;font-weight:600;cursor:help}
+.au .seq td.rm span:nth-child(n+3){display:none}
+.au .seq .cd{padding:0 7px;font-size:12px}.au .seq td.dst .dv{font-size:11px;margin-left:6px}
+.au .foot{margin:8px -10px -8px;padding:8px 12px}

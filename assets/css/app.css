@@ -35,7 +35,11 @@ a{color:var(--blue)}
 .brand small{display:block;font-size:10.5px;color:var(--nav-dim);font-weight:500;margin-top:1px}
 .collapse{position:absolute;right:-12px;top:20px;z-index:5;width:24px;height:24px;border-radius:50%;border:1px solid var(--line-2);background:#fff;color:var(--ink-2);cursor:pointer;font-size:13px;line-height:1;box-shadow:var(--shadow)}
 .nav{flex:1;overflow-y:auto;padding:10px 10px 12px}
-.nav-group{font-size:10.5px;color:var(--nav-dim);font-weight:600;letter-spacing:.02em;padding:14px 10px 5px;white-space:nowrap}
+.nav-group{display:flex;align-items:center;justify-content:space-between;width:100%;background:none;border:0;cursor:pointer;font:inherit;font-size:10.5px;color:var(--nav-dim);font-weight:600;letter-spacing:.02em;padding:14px 10px 5px;white-space:nowrap;text-align:left}
+.nav-group:hover{color:#fff}
+.nav-group svg{width:13px;height:13px;transition:transform .15s}
+.nav-group[aria-expanded="false"] svg{transform:rotate(-90deg)}
+.nav-items.shut{display:none}
 .nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;color:var(--nav-ink);text-decoration:none;font-size:12.5px;font-weight:500;white-space:nowrap;margin:1px 0}
 .nav a svg{width:17px;height:17px;flex:0 0 17px;opacity:.85}
 .nav a:hover{background:var(--nav-hi);color:#fff}
@@ -56,6 +60,7 @@ a{color:var(--blue)}
 .side.collapsed{width:64px;flex-basis:64px}
 .side.collapsed .brand-txt,.side.collapsed .nav-group,.side.collapsed .nav a span,.side.collapsed .nav a .count,.side.collapsed .userbox div,.side.collapsed .logout span{display:none}
 .side.collapsed .nav a{justify-content:center;padding:10px}
+.side.collapsed .nav-items.shut{display:block}
 .side.collapsed .brand{justify-content:center;padding:16px 0 14px}
 .side.collapsed .userbox{justify-content:center}
 
@@ -202,3 +207,13 @@ input[type=checkbox],input[type=radio]{accent-color:var(--blue)}
 .main .card:has(> .tablewrap) > .modulebar,.main .card:has(> .modulebar + .tablewrap) > .modulebar{margin-bottom:8px}
 .section-title{font-size:13px}
 .badge{border-radius:6px;font-weight:700;font-size:10.5px;padding:2px 7px}
+
+/* vehicle tracking pills / ages (Trips list, Tracking page, trip detail) */
+.tk-pill{display:inline-block;font-size:10.5px;font-weight:700;border-radius:999px;padding:1px 8px;white-space:nowrap}
+.tk-run{background:#ecfdf3;color:#067647}.tk-stop{background:#f2f4f7;color:#475467}.tk-lost{background:#fef3f2;color:#b42318}.tk-oth{background:#eff4ff;color:#1d4ed8}
+.tk-old{color:#b54708;font-weight:600}.tk-lostt{color:#b42318;font-weight:600}.tk-muted{color:#98a2b3}.trk-ico{width:34px;height:34px;border-radius:50%;background:#fff;border:3px solid #98a2b3;display:grid;place-items:center;font-size:18px;line-height:1;box-shadow:0 2px 8px rgba(16,24,40,.35)}
+.trk-ico.run{border-color:#17b26a;animation:trkpulse 1.8s ease-out infinite}.trk-ico.stop{border-color:#667085}.trk-ico.lost{border-color:#f04438}
+@keyframes trkpulse{0%{box-shadow:0 0 0 0 rgba(23,178,106,.55)}100%{box-shadow:0 0 0 14px rgba(23,178,106,0)}}
+.trk-note{background:#fffaeb;border:1px solid #fedf89;color:#93590c;border-radius:8px;padding:6px 10px;font-size:12px;max-width:280px;box-shadow:0 2px 8px rgba(16,24,40,.15)}
+
+.trk-note.ok{background:#ecfdf3;border-color:#abefc6;color:#067647}

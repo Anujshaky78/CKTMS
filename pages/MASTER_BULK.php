@@ -2,6 +2,8 @@
 declare(strict_types=1);
 require_once __DIR__.'/../auth/auth.php';
 require_once __DIR__.'/../includes/layout.php';
+require_login();
+require_perm('master'); // bulk import is an admin-only tool
 
 $d=db();
 $error='';
@@ -73,7 +75,7 @@ function bulk_bool(string $v,bool $default): bool {if($v==='')return $default;$v
 function bulk_num(string $v,float $default,string $label): float {$v=trim($v);if($v==='')return $default;$v=str_replace(',', '.', $v);if(!is_numeric($v))throw new Exception($label.' must be numeric.');$n=(float)$v;if($label==='Latitude'&&($n<-90||$n>90))throw new Exception('Latitude must be between -90 and 90.');if($label==='Longitude'&&($n<-180||$n>180))throw new Exception('Longitude must be between -180 and 180.');return $n;}
 
 if($_SERVER['REQUEST_METHOD']==='POST'){
-  verify_csrf();
+  verify_csrf(); require_perm('master');
   try{
     $action=$_POST['action']??'';
     if($action==='upload_preview'){

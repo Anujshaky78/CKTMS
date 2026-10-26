@@ -10,7 +10,7 @@ $back = 'DISPATCH.php' . ($dcFilter ? '?dc=' . $dcFilter : '');
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   try {
-    verify_csrf();
+    verify_csrf(); require_perm('plan');
     $a = (string)($_POST['action'] ?? '');
     $d->beginTransaction();
     switch ($a) {
@@ -23,7 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       default: throw new Exception('Unknown action.');
     }
     $d->commit(); setflash($m); redirect($back . '#t' . (int)($_POST['trip_id'] ?? 0));
-  } catch (Throwable $x) { if ($d->inTransaction()) $d->rollBack(); $err = $x->getMessage(); }
+  } catch (Throwable $x) { if ($d->inTransaction()) $d->rollBack(); $err = tms_friendly_error($x); }
 }
 
 $dcs = $d->query("SELECT id,dc_code,dc_name FROM tms_dc_master WHERE COALESCE(active,TRUE) ORDER BY dc_code")->fetchAll(PDO::FETCH_ASSOC);
@@ -96,6 +96,7 @@ head('Dispatch desk');
   <td><?php if ($state === 'need'): ?><span class="st st-need">Needs vehicle</span><?php elseif ($state): ?><span class="st st-<?= e($state) ?>"><?= e($state) ?></span><div class="dd-small"><?= e($ago($state === 'Requested' ? $t['requested_at'] : ($state === 'Confirmed' ? $t['confirmed_at'] : $t['placed_at']))) ?></div><?php else: ?><span class="dd-small"><?= e($t['status']) ?></span><?php endif; ?>
       <?= $t['dock_code'] ? '<div><span class="badge b-green">Dock ' . e($t['dock_code']) . '</span></div>' : '' ?></td>
   <td><div class="dd-act">
+  <?php if (!can('plan')): ?><span class="dd-small">View only</span><?php else: ?>
   <?php if ($state === 'need'): ?>
     <form method="post"><input type="hidden" name="csrf" value="<?= e($tok) ?>"><input type="hidden" name="action" value="request"><input type="hidden" name="trip_id" value="<?= (int)$t['id'] ?>">
       <select class="select" name="transporter_id" required aria-label="Transporter"><option value="">Transporter</option><?php foreach ($tpts as $x): ?><option value="<?= (int)$x['id'] ?>"><?= e($x['name']) ?></option><?php endforeach; ?></select>
@@ -120,6 +121,7 @@ head('Dispatch desk');
     <details><summary>Cancel trip</summary><form method="post" onsubmit="return confirm('Cancel <?= e($t['trip_code']) ?>? PRD challans go back to PRD Pending.')"><input type="hidden" name="csrf" value="<?= e($tok) ?>"><input type="hidden" name="action" value="cancel"><input type="hidden" name="trip_id" value="<?= (int)$t['id'] ?>">
       <input class="input" name="reason" placeholder="Why is the trip cancelled?" required style="width:220px"><button class="btn danger">Cancel trip</button></form></details>
   <?php endif; ?>
+  <?php endif; /* can('plan') */ ?>
   </div></td>
 </tr>
 <?php endforeach; if (!$trips): ?><tr><td colspan="7" class="note" style="padding:24px;text-align:center">No open trips. Plan trips from PRD Pending first.</td></tr><?php endif; ?>

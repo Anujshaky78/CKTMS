@@ -67,7 +67,7 @@ function dsp_confirm(PDO $d, int $pid, string $vehicleNo, string $driverName = '
   $t = dsp_trip($d, (int)$p['trip_id']);
   $no = dsp_norm_vehicle_no($vehicleNo);
   if (strlen($no) < 6) throw new Exception('Valid vehicle number daalein, jaise HR55AB1234.');
-  $vq = $d->prepare("SELECT * FROM vehicles WHERE upper(regexp_replace(vehicle_number,'[^A-Za-z0-9]','','g'))=? LIMIT 1"); $vq->execute([$no]); $v = $vq->fetch(PDO::FETCH_ASSOC);
+  $vq = $d->prepare("SELECT * FROM vehicles WHERE upper(regexp_replace(vehicle_number,'[^A-Za-z0-9]','','g'))=? LIMIT 1 FOR UPDATE"); $vq->execute([$no]); $v = $vq->fetch(PDO::FETCH_ASSOC);
   if (!$v) {
     $ins = $d->prepare("INSERT INTO vehicles(vehicle_number,vehicle_type,status,active,transporter_id) VALUES(?,?,'Available',TRUE,?) RETURNING *");
     $ins->execute([$no, $p['vehicle_type'] ?: null, (int)$p['transporter_id']]); $v = $ins->fetch(PDO::FETCH_ASSOC);

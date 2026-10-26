@@ -18,8 +18,22 @@ if (!function_exists('route_distance_km')) {
 function route_distance_km(array $origin,array $stops):float{$total=0;$cur=$origin;foreach($stops as $s){$total+=distance_km($cur,$s);$cur=$s;}return $total;}
 }
 
+/**
+ * Reserve the next trips.id from the table's own sequence and build the trip code from it, so two requests can never get the same code
+ * (the old MAX(id)+1 could) and the code always matches the id. Pass the id on to insert_trip_compat().
+ * @return array{0:int,1:string} [id, code]
+ */
+if (!function_exists('tms_next_trip')) {
+function tms_next_trip(PDO $d): array {
+  try { $id = (int)$d->query("SELECT nextval(pg_get_serial_sequence('trips','id'))")->fetchColumn(); }
+  catch (Throwable $e) { $id = 0; }
+  if ($id <= 0) $id = (int)$d->query('SELECT COALESCE(MAX(id),0)+1 FROM trips')->fetchColumn();
+  return [$id, 'TRP-' . date('ymd') . '-' . str_pad((string)$id, 4, '0', STR_PAD_LEFT)];
+}
+}
+
 if (!function_exists('insert_trip_compat')) {
-function insert_trip_compat(PDO $d, string $code, int $pkt, float $value, string $date, ?int $srcDcId, ?int $destId): int{
+function insert_trip_compat(PDO $d, string $code, int $pkt, float $value, string $date, ?int $srcDcId, ?int $destId, ?int $tripId = null): int{
   $cols=$d->query("SELECT column_name,is_nullable,column_default,data_type,character_maximum_length FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='trips' ORDER BY ordinal_position")->fetchAll(PDO::FETCH_ASSOC);
   $names=array_column($cols,'column_name');
   $data=[];
@@ -77,6 +91,7 @@ function insert_trip_compat(PDO $d, string $code, int $pkt, float $value, string
   $put('destination_store_id',$destId); $put('destination_id',$destId); $put('store_id',$destId);
   $put('planned_date',$date); $put('trip_date',$date); $put('dispatch_date',$date);
   $put('loaded_packets',0); $put('loaded_value',0);
+  if($tripId!==null) $data['id']=$tripId;
 
   // Populate any other legacy NOT NULL column that has no default only when a safe value is known.
   foreach($cols as $c){
@@ -123,7 +138,7 @@ if (!function_exists('prd_create_trip_tx')) {
  * $joint: allow parts from more than one warehouse (one vehicle collects from both DCs).
  * $dcId: first pickup / loading DC.
  */
-function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $joint = false): array {
+function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $joint = false, ?array $planLineIds = null): array {
   $want = [];  // gkey => null (whole) | [pkts]
   foreach ($stops as $st) {
     $parts = is_array($st) ? ($st['parts'] ?? [['gkey' => $st['gkey'] ?? '', 'pkts' => $st['pkts'] ?? null]]) : [['gkey' => (string)$st, 'pkts' => null]];
@@ -135,7 +150,7 @@ function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $
   }
   if (!$want) throw new Exception('Is trip me koi store nahi hai.');
   if (!$dcId) throw new Exception('Is trip ki site kisi Center DC se linked nahi hai. Masters → Transporters & docks → Warehouses me site ko DC se link karein.');
-  $groups = prd_enrich($d, prd_load_groups($d, array_keys($want)));
+  $groups = prd_enrich($d, prd_load_groups($d, array_keys($want), $planLineIds)); // $planLineIds: trips made from plans use exactly the challans reserved for those plan lines
   if (count($groups) !== count($want)) throw new Exception('Kuch stores ab pending nahi hain (dusre trip me gaye ya Oracle me dispatch ho gaye). Page refresh karein.');
   $holds = prd_active_holds($d);
   $sources = []; $byStore = []; $pick = [];
@@ -159,6 +174,9 @@ function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $
   }
   $packets = 0; $value = 0.0; foreach ($byStore as $x) foreach ($x['parts'] as $pt) { $packets += $pt['pkt']; $value += $pt['value']; }
   tms_trip_check(count($byStore), $packets);
+  // one trip per store per day (also protects against two people creating trips for the same store)
+  $tw = prd_stores_with_trip_today($d);
+  foreach ($byStore as $sid => $x) if (isset($tw[$sid])) throw new Exception('Store ' . ($x['g']['store']['code'] ?? $x['g']['destination_name']) . ' already has trip ' . $tw[$sid] . ' today. A store gets only one trip per day.');
   if (!isset($pick[$dcId])) throw new Exception('Chosen loading DC is trip ke kisi store ka source nahi hai.');
   // pickup order: chosen DC first, then the rest by size
   $order = array_keys($pick); usort($order, fn($a, $b) => ($a === $dcId ? -1 : ($b === $dcId ? 1 : $pick[$b]['pkt'] <=> $pick[$a]['pkt'])));
@@ -169,10 +187,10 @@ function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $
   $ordered = array_map(fn($sid) => $byStore[$sid], prd_best_order($oGeo, $pts)['order']);
   $allIds = []; foreach ($ordered as $x) foreach ($x['parts'] as $pt) $allIds = array_merge($allIds, $pt['ids']);
   $ph = implode(',', array_fill(0, count($allIds), '?'));
-  $lk = $d->prepare("SELECT id FROM prd_pending p WHERE id IN ($ph) AND " . prd_pending_where('p') . " FOR UPDATE"); $lk->execute($allIds);
+  $lk = $d->prepare("SELECT id FROM prd_pending p WHERE id IN ($ph) AND " . prd_pending_where('p', $planLineIds !== null) . " FOR UPDATE"); $lk->execute($allIds);
   if (count($lk->fetchAll(PDO::FETCH_COLUMN)) !== count($allIds)) throw new Exception('Selected challans abhi kisi aur ne plan kar diye. Page refresh karein.');
-  $seq = (int)$d->query('SELECT COALESCE(MAX(id),0)+1 FROM trips')->fetchColumn(); $code = 'TRP-' . date('ymd') . '-' . str_pad((string)$seq, 4, '0', STR_PAD_LEFT);
-  $tripId = insert_trip_compat($d, $code, $packets, $value, date('Y-m-d'), $dcId, (int)$ordered[0]['g']['store']['id']);
+  [$newId, $code] = tms_next_trip($d);
+  $tripId = insert_trip_compat($d, $code, $packets, $value, date('Y-m-d'), $dcId, (int)$ordered[0]['g']['store']['id'], $newId);
   $stop = $d->prepare("INSERT INTO tms_trip_stops(trip_id,sequence_no,store_id,packet_count,stop_value,status,expected_delivery_at) VALUES(?,?,?,?,?,'Planned',NULL)");
   $ind = $d->prepare("INSERT INTO tms_indents(indent_no,indent_date,source_dc_id,destination_store_id,packet_count,indent_value,status,trip_id,source_ref,created_by) VALUES(?,?,?,?,?,?,'Trip Created',?,?,?) ON CONFLICT(indent_no) DO UPDATE SET trip_id=EXCLUDED.trip_id,status='Trip Created'");
   foreach ($ordered as $i => $x) {
@@ -186,6 +204,7 @@ function prd_create_trip_tx(PDO $d, array $stops, int $dcId, string $veh, bool $
   $veh = prd_cut(trim($veh), 60);
   $d->prepare("UPDATE trips SET is_joint=?, vehicle_type=NULLIF(?,'') WHERE id=?")->execute([count($pick) > 1 ? 'true' : 'false', $veh, $tripId]);
   $d->prepare("INSERT INTO tms_trip_status_history(trip_id,status,remarks,created_by) VALUES(?,?,?,?)")->execute([$tripId, 'Planned', 'PRD plan: ' . count($ordered) . ' store(s), ' . $packets . ' PKT' . (count($pick) > 1 ? ', joint pickup from ' . count($pick) . ' warehouses' : '') . ($veh !== '' ? ', vehicle ' . $veh : ''), $_SESSION['user_id'] ?? null]);
+  if (function_exists('prd_groups_cache_clear')) prd_groups_cache_clear(); // these challans are planned now; later boards in this request must not use the old list
   return ['id' => $tripId, 'code' => $code, 'stores' => count($ordered), 'pkt' => $packets, 'joint' => count($pick) > 1];
 }
 }

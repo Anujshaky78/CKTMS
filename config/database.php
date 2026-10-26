@@ -7,5 +7,5 @@ return array_replace([
   'port' => getenv('TMS_DB_PORT') ?: '5432',
   'name' => getenv('TMS_DB_NAME') ?: 'citykart_dc',
   'user' => getenv('TMS_DB_USER') ?: 'postgres',
-  'password' => getenv('TMS_DB_PASSWORD') !== false ? getenv('TMS_DB_PASSWORD') : '123',
+  'password' => getenv('TMS_DB_PASSWORD') !== false ? getenv('TMS_DB_PASSWORD') : '',
 ], is_array($local) ? $local : []);
