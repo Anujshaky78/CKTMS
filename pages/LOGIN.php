@@ -6,8 +6,16 @@ $error='';
 if($_SERVER['REQUEST_METHOD']==='POST'){
  $u=trim($_POST['username']??'');$p=$_POST['password']??'';
  try{$st=db()->prepare("SELECT * FROM users WHERE username=:u OR COALESCE(email,'')=:u LIMIT 1");$st->execute(['u'=>$u]);$x=$st->fetch();
- if($x && (password_verify($p,$x['password'])||hash_equals((string)$x['password'],$p))){session_regenerate_id(true);$_SESSION['user_id']=$x['id'];$_SESSION['user_name']=$x['full_name']??$x['name']??$x['username']??'User';$_SESSION['role']=$x['role']??'dispatcher';redirect('../pages/INDEX.php');}else $error='Invalid username or password.';
- }catch(Throwable $e){$error='Database error: '.$e->getMessage();}
+ $ok=false;
+ if($x){
+  if(password_verify($p,(string)$x['password'])) $ok=true;
+  elseif(hash_equals((string)$x['password'],$p)){ // legacy plaintext password: accept once, then store a hash
+   $ok=true;
+   try{db()->prepare("UPDATE users SET password=? WHERE id=?")->execute([password_hash($p,PASSWORD_DEFAULT),$x['id']]);}catch(Throwable $e){}
+  }
+ }
+ if($ok){session_regenerate_id(true);$_SESSION['user_id']=$x['id'];$_SESSION['user_name']=$x['full_name']??$x['name']??$x['username']??'User';$_SESSION['role']=$x['role']??'dispatcher';redirect('../pages/INDEX.php');}else $error='Invalid username or password.';
+ }catch(Throwable $e){error_log('TMS login error: '.$e->getMessage());$error='Login is temporarily unavailable. Please try again.';}
 }
 ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
