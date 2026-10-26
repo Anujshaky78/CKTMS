@@ -99,6 +99,13 @@ function head(string $title): void {
   <div class="top-right"><?= tms_oracle_pill() ?><span class="user"><?= e($name) ?></span></div>
 </header>
 <script src="<?= e(asset('assets/js/app.js')) ?>"></script>
+<script>
+// Add the CSRF token to every POST form at submit time (covers forms built by JavaScript too).
+document.addEventListener('submit',function(ev){var f=ev.target;
+  if(!f||!f.tagName||f.tagName!=='FORM'||String(f.method).toLowerCase()!=='post'||f.querySelector('input[name="csrf"]'))return;
+  var i=document.createElement('input');i.type='hidden';i.name='csrf';i.value=<?= json_encode(csrf()) ?>;f.appendChild(i);
+},true);
+</script>
 <?php }
 }
 if (!function_exists('foot')) { function foot(): void { echo '</main></div></body></html>'; } }

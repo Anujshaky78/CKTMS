@@ -22,6 +22,7 @@ function distance_km($a,$b):float{ $lat1=(float)($a['latitude']??0);$lon1=(float
 }
 
 if($_SERVER['REQUEST_METHOD']==='POST'){
+ verify_csrf();
  try{
   $action=$_POST['action']??'';
   if($action==='trip_status'){

@@ -2,6 +2,7 @@
 // Planning POST actions: indents, trips, gate pass, status, PRD sync.
 // Included from pages/PLANNING.php; shares its variables ($d, $stores, $dcs, $msg, $err, $tab, …).
 if($_SERVER['REQUEST_METHOD']==='POST'){
+  verify_csrf(); // every state-changing planning form carries the token (injected by layout.php)
   $action=$_POST['action']??'';
   if($action==='import_prd_csv'){
     $err='PRD Pending ab sirf Oracle se aata hai (CHALLAN_STATUS = Pending). CSV import band hai, "Sync Oracle" use karein.';
