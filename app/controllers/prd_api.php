@@ -71,7 +71,7 @@ if($_SERVER['REQUEST_METHOD']==='POST' && in_array($_POST['action']??'',['prd_pr
     if($_POST['action']==='prd_preview'){
       $keys=array_values(array_unique(array_filter(array_map('strval',(array)($_POST['keys']??[])),fn($k)=>(bool)preg_match('/^[a-f0-9]{32}$/',$k))));
       if(!$keys) throw new Exception('Kam se kam ek store select karein.');
-      $plan=prd_plan_selection($d,$keys,($_POST['mode']??'')==='joint'?'joint':'separate',null,['balance'=>!empty($_POST['balance']),'strict'=>!empty($_POST['strict']),'max_stops'=>(int)($_POST['max_stops']??0)]);
+      $plan=prd_plan_selection($d,$keys,($_POST['mode']??'')==='joint'?'joint':'separate',null,['balance'=>!empty($_POST['balance']),'strict'=>!empty($_POST['strict']),'max_stops'=>(int)($_POST['max_stops']??0),'low_stock'=>((int)($_POST['low_pkt']??0)>0&&(int)($_POST['low_days']??0)>0)?[(int)$_POST['low_pkt'],(int)$_POST['low_days']]:null]);
       $plan['dcs']=array_map(fn($x)=>['id'=>(int)$x['id'],'label'=>$x['dc_code'].' · '.$x['dc_name']],$d->query("SELECT id,dc_code,dc_name FROM tms_dc_master WHERE COALESCE(active,TRUE) ORDER BY dc_code")->fetchAll(PDO::FETCH_ASSOC));
       echo json_encode(['ok'=>true]+$plan); exit;
     }

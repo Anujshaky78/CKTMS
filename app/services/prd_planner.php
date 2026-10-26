@@ -263,7 +263,7 @@ function prd_enrich(PDO $d, array $groups): array {
   // Last dispatch per store: dispatched trips first, then indents as fallback.
   $lastTrip = [];
   foreach (prd_safe_rows($d, "SELECT ts.store_id, MAX(COALESCE(t.dispatched_at::date, t.dispatch_date, t.planned_date)) dt FROM tms_trip_stops ts JOIN trips t ON t.id=ts.trip_id
-       WHERE t.status IN ('In Transit','Delivered') GROUP BY ts.store_id") as $r) $lastTrip[(int)$r['store_id']] = $r['dt'];
+       WHERE t.status IN ('In Transit','Delivered','Breakdown','Accident') GROUP BY ts.store_id") as $r) $lastTrip[(int)$r['store_id']] = $r['dt'];
   $lastIndent = [];
   foreach (prd_safe_rows($d, "SELECT i.destination_store_id sid, MAX(i.indent_date) dt FROM tms_indents i LEFT JOIN trips t ON t.id=i.trip_id
        WHERE lower(COALESCE(i.status,'')) IN ('dispatched','in transit','delivered','completed') AND COALESCE(t.status,'')<>'Cancelled' GROUP BY 1") as $r) $lastIndent[(int)$r['sid']] = $r['dt'];
@@ -286,10 +286,13 @@ function prd_enrich(PDO $d, array $groups): array {
     $g['dc_geo'] = ($dc && ((float)$dc['latitude'] || (float)$dc['longitude'])) ? ['lat' => (float)$dc['latitude'], 'lng' => (float)$dc['longitude']] : null;
     $g['dc_km'] = prd_km($g['dc_geo'], $g['geo']);
 
-    // Oracle last invoice date (report LAST_DISP_DATE) first; TMS dispatched trips only when Oracle has none
-    $last = $g['last_dispatch_src'] ?: null; $srcLbl = $last ? 'oracle' : null;
-    if (!$last && $st && !empty($lastTrip[(int)$st['id']])) { $last = $lastTrip[(int)$st['id']]; $srcLbl = 'trip'; }
-    if (!$last && $st && !empty($lastIndent[(int)$st['id']])) { $last = $lastIndent[(int)$st['id']]; $srcLbl = 'indent'; }
+    // Last dispatch = the MOST RECENT of Oracle (report LAST_DISP_DATE), TMS dispatched trips and dispatched indents.
+    // Oracle's date can lag behind a trip TMS dispatched yesterday; taking Oracle first made such a store look
+    // "not dispatched recently", so the low-stock rule (PKT below X and dispatched within N days) did not hold it back.
+    $last = null; $srcLbl = null;
+    foreach ([['oracle', $g['last_dispatch_src'] ?: null], ['trip', $st ? ($lastTrip[(int)$st['id']] ?? null) : null], ['indent', $st ? ($lastIndent[(int)$st['id']] ?? null) : null]] as [$lbl, $dt]) {
+      if ($dt && (!$last || strtotime((string)$dt) > strtotime((string)$last))) { $last = $dt; $srcLbl = $lbl; }
+    }
     $g['last_dispatch'] = $last; $g['last_dispatch_basis'] = $srcLbl;
     $g['gap_days'] = $last ? max(0, (int)floor(($today - strtotime((string)$last)) / 86400)) : null;
     $g['age_days'] = $g['oldest_challan'] ? max(0, (int)floor(($today - strtotime((string)$g['oldest_challan'])) / 86400)) : null;
@@ -580,6 +583,10 @@ function prd_plan_selection(PDO $d, array $keys, string $mode = 'separate', ?arr
     if ($g['hold']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'On hold: ' . $g['hold']['reason'] . ($g['hold']['remarks'] ? ' (' . $g['hold']['remarks'] . ')' : '') . '. Release the hold to plan it.']; continue; }
     if (!$g['store']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Not in Store Master. Run Store sync or add the store.']; continue; }
     if ($g['closed']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Store is closed (' . $g['store_status'] . ').']; continue; }
+    // Auto trips low-stock rule, enforced here too (not only in the browser): PKT below X AND dispatched within N days -> no trip, alone or clubbed.
+    if (!empty($opt['low_stock']) && $g['wait_days'] !== null && (int)$g['pkt'] < (int)$opt['low_stock'][0] && (int)$g['wait_days'] < (int)$opt['low_stock'][1]) {
+      $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Low stock: ' . (int)$g['pkt'] . ' PKT (below ' . (int)$opt['low_stock'][0] . ') and ' . ($g['gap_days'] !== null ? 'dispatched ' . (int)$g['gap_days'] . ' day(s) ago' : 'oldest challan only ' . (int)$g['wait_days'] . ' day(s) old') . ' (within ' . (int)$opt['low_stock'][1] . ' days). Trip not created, it waits.']; continue;
+    }
     if ($joint) foreach ($g['parts'] as $pt) if (!$pt['dc']) { $excluded[] = ['gkey' => $k, 'name' => $g['destination_name'], 'reason' => 'Source “' . $pt['source'] . '” is not in Center DC master, so a joint pickup cannot be routed.']; continue 2; }
     // One trip per store per day: a store that already has an active trip today is not planned again.
     $sid = (int)($g['store']['id'] ?? 0);

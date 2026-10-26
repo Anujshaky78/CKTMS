@@ -146,7 +146,7 @@ $cfgSites = array_flip(array_map('strval', $oc['src_site_codes'] ?? [])); if ($c
     const p=pick(); skipped=p.wait; if(!p.go.length){alert('No store to plan with these settings.');return;}
     const b=$('#auRun'); b.disabled=true; b.textContent='Analysing…'; const t=++tok;
     try{
-      $('#auDlg').close(); const ns=msSite.get().length; both=p.go.filter(i=>sitesOf(i).length>1).map(i=>({id:i,sites:sitesOf(i)})); runSites=msSite.get(); const j=await post({action:'prd_preview',keys:p.go.flatMap(i=>view(i).keys),mode:ns>1?'joint':'separate',balance:1,strict:p.r.strict?1:'',max_stops:p.r.max});
+      $('#auDlg').close(); const ns=msSite.get().length; both=p.go.filter(i=>sitesOf(i).length>1).map(i=>({id:i,sites:sitesOf(i)})); runSites=msSite.get(); const j=await post({action:'prd_preview',keys:p.go.flatMap(i=>view(i).keys),mode:ns>1?'joint':'separate',balance:1,strict:p.r.strict?1:'',max_stops:p.r.max,low_pkt:p.r.low?p.r.lp:0,low_days:p.r.low?p.r.ld:0});
       if(t!==tok)return; plan=j; plan.loads.forEach(l=>{l.on=true;l.cl=clusterOf(l);}); tab='seq'; render(); $('#auEmpty').hidden=true; $('#auRes').hidden=false; $('#auRes').scrollIntoView({behavior:'smooth',block:'start'});
     }catch(e){alert('Analysis failed: '+e.message);$('#auDlg').showModal();}
     finally{b.disabled=false;b.textContent='⚡ Analyse & plan trips';}
