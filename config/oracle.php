@@ -17,7 +17,7 @@ return array_replace([
   // ---------------- PRD PENDING (MISRETAIL.CUBE$SALDC) ----------------
   'cube_code' => '15',
   // Put BOTH DC Oracle SITE_CODE values here, e.g. ['123', '456']; do not use DC display names.
-  'src_site_codes' => array_values(array_filter(array_map('trim', explode(',', getenv('TMS_ORACLE_SRC_SITE_CODES') ?: '123','420')))),
+  'src_site_codes' => array_values(array_filter(array_map('trim', explode(',', getenv('TMS_ORACLE_SRC_SITE_CODES') ?: '123,420')))),
   // Sirf isi CHALLAN_STATUS wale challans aayenge (case/space ignore hota hai).
   'challan_status' => 'PENDING',
   // Kitne din purane pending challans tak dekhna hai. 0 = koi date limit nahi (saare pending, PRD report jaisa).
